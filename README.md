@@ -10,5 +10,6 @@ B站视频搜索
 
 更新 关注up 封面显示
 
-<img width="461" height="817" alt="image" src="https://github.com/user-attachments/assets/8592cba2-7b45-43f6-b637-c3d277aa9b81" />
+<img width="400" height="818" alt="image" src="https://github.com/user-attachments/assets/0c280011-b16a-41fb-ab0b-8eeb9cf401d5" />
+
 <img width="458" height="821" alt="image" src="https://github.com/user-attachments/assets/b19dbf50-f50e-4124-837d-67f2425934fe" />
