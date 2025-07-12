@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional
+from urllib.parse import quote
 
 from hoshino import Service, priv
 from hoshino.typing import CQEvent
@@ -159,6 +160,26 @@ async def get_bilibili_search(keyword: str, search_type: str = "video"):
             sv.logger.error(f"搜索失败: {str(e)}")
         return []
 
+async def safe_send(bot, ev, message):
+    """安全发送消息，防止消息体解析错误"""
+    try:
+        if not message or message.strip() == '':
+            return
+            
+        if isinstance(message, list):
+            message = '\n'.join(message)
+            
+        await bot.send(ev, message)
+    except Exception as e:
+        sv.logger.error(f'发送消息失败: {str(e)}')
+        try:
+            # 尝试发送简化版消息
+            simple_msg = re.sub(r'\[CQ:image[^\]]+\]', '', message)
+            if simple_msg.strip():
+                await bot.send(ev, simple_msg)
+        except Exception as e2:
+            sv.logger.error(f'发送简化消息也失败: {str(e2)}')
+
 @sv.on_prefix('关注up')
 async def watch_bilibili_up(bot, ev: CQEvent):
     up_name = ev.message.extract_plain_text().strip()
@@ -223,10 +244,10 @@ async def list_watched_ups(bot, ev: CQEvent):
         await bot.send(ev, '当前没有监控任何UP主')
         return
     
-    up_list = ["📢 当前监控的UP主列表:", "━━━━━━━━━━━━━━━━━━"]
+    up_list = ["📢📢 当前监控的UP主列表:", "━━━━━━━━━━━━━━━━━━"]
     for up_uid, info in watches.items():
         last_check = datetime.fromisoformat(info['last_check']).strftime('%m-%d %H:%M')
-        up_list.append(f"👤 {info['up_name']} (UID:{up_uid}) | 最后检查: {last_check}")
+        up_list.append(f"👤👤 {info['up_name']} (UID:{up_uid}) | 最后检查: {last_check}")
         up_list.append("━━━━━━━━━━━━━━━━━━")
     
     await bot.send(ev, "\n".join(up_list))
@@ -239,25 +260,33 @@ async def search_bilibili_video(bot, ev: CQEvent):
         return
     
     try:
-        msg_id = (await bot.send(ev, "🔍 搜索中..."))['message_id']
+        msg_id = (await bot.send(ev, "🔍🔍 搜索中..."))['message_id']
         results = await get_bilibili_search(keyword, "video")
         
         if not results:
             await bot.finish(ev, f'未找到"{keyword}"相关视频')
             return
 
-        reply = ["📺 搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
+        reply = ["📺📺 搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
         for i, video in enumerate(results, 1):
             clean_title = re.sub(r'<[^>]+>', '', video['title'])
             pub_time = time.strftime("%Y-%m-%d", time.localtime(video['pubdate']))
+            
+            # 处理图片URL
+            pic_url = video['pic']
+            if not pic_url.startswith(('http://', 'https://')):
+                pic_url = 'https:' + pic_url
+            proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.replace("https://", "").replace("http://", ""), safe="")}'
+            
             reply.extend([
                 f"{i}. {clean_title}",
-                f"   📅 {pub_time} | 👤 {video['author']}",
-                f"   🔗 https://b23.tv/{video['bvid']}",
+                f"[CQ:image,file={proxied_url}]",  # 图片放在标题下方
+                f"   📅📅 {pub_time} | 👤👤 {video['author']}",
+                f"   🔗🔗 https://b23.tv/{video['bvid']}",
                 "━━━━━━━━━━━━━━━━━━"
             ])
         
-        await bot.send(ev, "\n".join(reply))
+        await safe_send(bot, ev, "\n".join(reply))
     except Exception as e:
         await bot.send(ev, f'搜索失败: {str(e)}')
 
@@ -269,23 +298,31 @@ async def search_bilibili_up(bot, ev: CQEvent):
         return
 
     try:
-        msg_id = (await bot.send(ev, f"🔍 正在搜索【{up_name}】的最新视频..."))['message_id']
+        msg_id = (await bot.send(ev, f"🔍🔍 正在搜索【{up_name}】的最新视频..."))['message_id']
         
         results = await get_bilibili_search(up_name, "up")
         if not results:
             await bot.finish(ev, f'未找到UP主【{up_name}】的视频')
             return
 
-        reply = [f"👤 {results[0]['author']} (UID:{results[0]['mid']}) 的搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
+        reply = [f"👤👤 {results[0]['author']} (UID:{results[0]['mid']}) 的搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
         for i, video in enumerate(results, 1):
             pub_time = time.strftime("%Y-%m-%d", time.localtime(video['pubdate']))
+            
+            # 处理图片URL
+            pic_url = video['pic']
+            if not pic_url.startswith(('http://', 'https://')):
+                pic_url = 'https:' + pic_url
+            proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.replace("https://", "").replace("http://", ""), safe="")}'
+            
             reply.extend([
                 f"{i}. {re.sub(r'<[^>]+>', '', video['title'])}",
-                f"   📅 {pub_time} | 👀 {video.get('play', 0)}播放",
-                f"   🔗 https://b23.tv/{video['bvid']}",
+                f"[CQ:image,file={proxied_url}]",  # 图片放在标题下方
+                f"   📅📅 {pub_time} | 👀👀 {video.get('play', 0)}播放",
+                f"   🔗🔗 https://b23.tv/{video['bvid']}",
                 "━━━━━━━━━━━━━━━━━━"
             ])
-        await bot.send(ev, "\n".join(reply))
+        await safe_send(bot, ev, "\n".join(reply))
 
     except Exception as e:
         await bot.send(ev, f'搜索失败: {str(e)}')
@@ -316,9 +353,17 @@ async def check_up_updates():
                 
                 if latest_video['bvid'] != info.get('last_vid') or name_changed:
                     pub_time = time.strftime("%Y-%m-%d %H:%M", time.localtime(latest_video['pubdate']))
+                    
+                    # 处理图片URL
+                    pic_url = latest_video['pic']
+                    if not pic_url.startswith(('http://', 'https://')):
+                        pic_url = 'https:' + pic_url
+                    proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.replace("https://", "").replace("http://", ""), safe="")}'
+                    
                     msg = [
-                        f"📢 UP主【{new_name if name_changed else current_up_name}】(UID:{up_uid})发布了新视频！",
+                        f"📢📢 UP主【{new_name if name_changed else current_up_name}】(UID:{up_uid})发布了新视频！",
                         f"标题: {latest_video['title']}",
+                        f"[CQ:image,file={proxied_url}]",  # 图片放在标题下方
                         f"发布时间: {pub_time}",
                         f"视频链接: https://b23.tv/{latest_video['bvid']}",
                         "━━━━━━━━━━━━━━━━━━"
