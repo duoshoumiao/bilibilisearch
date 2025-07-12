@@ -5,7 +5,7 @@ import time
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from hoshino import Service, priv
 from hoshino.typing import CQEvent
@@ -44,39 +44,73 @@ class UpWatchStorage:
         except Exception as e:
             sv.logger.error(f"保存监控数据失败: {str(e)}")
     
-    def add_watch(self, group_id: int, up_name: str, last_vid: str = None):
+    def add_watch(self, group_id: int, up_name: str, up_uid: str, last_vid: str = None):
         group_id = str(group_id)
         if group_id not in self._data:
             self._data[group_id] = {}
-        self._data[group_id][up_name] = {
+        self._data[group_id][up_uid] = {
+            'up_name': up_name,
             'last_check': datetime.now().isoformat(),
             'last_vid': last_vid
         }
         self.save()
     
-    def remove_watch(self, group_id: int, up_name: str):
+    def remove_watch(self, group_id: int, up_name_or_uid: str) -> Optional[str]:
         group_id = str(group_id)
-        if group_id in self._data and up_name in self._data[group_id]:
-            del self._data[group_id][up_name]
+        if group_id not in self._data:
+            return None
+            
+        # 先尝试按UID查找
+        if up_name_or_uid in self._data[group_id]:
+            del self._data[group_id][up_name_or_uid]
             if not self._data[group_id]:
                 del self._data[group_id]
             self.save()
+            return up_name_or_uid
+            
+        # 按名称查找
+        for uid, info in self._data[group_id].items():
+            if info['up_name'].lower() == up_name_or_uid.lower():
+                del self._data[group_id][uid]
+                if not self._data[group_id]:
+                    del self._data[group_id]
+                self.save()
+                return uid
+                
+        return None
     
-    def get_group_watches(self, group_id: int) -> Dict[str, Any]:
+    def get_group_watches(self, group_id: int) -> Dict[str, Dict[str, Any]]:
         group_id = str(group_id)
         return self._data.get(group_id, {})
     
     def get_all_watches(self) -> Dict[str, Any]:
         return self._data
     
-    def update_last_video(self, group_id: int, up_name: str, last_vid: str):
+    def update_last_video(self, group_id: int, up_uid: str, last_vid: str, new_name: str = None):
         group_id = str(group_id)
-        if group_id in self._data and up_name in self._data[group_id]:
-            self._data[group_id][up_name].update({
+        if group_id in self._data and up_uid in self._data[group_id]:
+            if new_name:
+                self._data[group_id][up_uid]['up_name'] = new_name
+            self._data[group_id][up_uid].update({
                 'last_vid': last_vid,
                 'last_check': datetime.now().isoformat()
             })
             self.save()
+    
+    def get_up_name_by_uid(self, group_id: int, up_uid: str) -> Optional[str]:
+        group_id = str(group_id)
+        if group_id in self._data and up_uid in self._data[group_id]:
+            return self._data[group_id][up_uid].get('up_name')
+        return None
+    
+    def get_up_uid_by_name(self, group_id: int, up_name: str) -> Optional[str]:
+        group_id = str(group_id)
+        if group_id not in self._data:
+            return None
+        for uid, info in self._data[group_id].items():
+            if info['up_name'].lower() == up_name.lower():
+                return uid
+        return None
 
 # 全局存储实例
 watch_storage = UpWatchStorage()
@@ -114,7 +148,11 @@ async def get_bilibili_search(keyword: str, search_type: str = "video"):
                 if data.get('code') == 0:
                     results = data['data'].get('result', [])[:MAX_RESULTS]
                     if search_type == "up":
+                        # 按UP主名称精确匹配
                         results = [v for v in results if v['author'].lower() == keyword.lower()]
+                        # 如果没有精确匹配结果，返回第一个结果（可能是UP主改名前的内容）
+                        if not results and data['data'].get('result'):
+                            results = [data['data']['result'][0]]
                     search_cache[cache_key] = (results, datetime.now())
                     return results
         except Exception as e:
@@ -130,11 +168,12 @@ async def watch_bilibili_up(bot, ev: CQEvent):
     
     group_id = ev.group_id
     
-    watches = watch_storage.get_group_watches(group_id)
-    for watched_up in watches:
-        if watched_up.lower() == up_name.lower():
-            await bot.send(ev, f'【{watched_up}】已经在监控列表中了')
-            return
+    # 检查是否已经关注
+    existing_uid = watch_storage.get_up_uid_by_name(group_id, up_name)
+    if existing_uid:
+        current_name = watch_storage.get_up_name_by_uid(group_id, existing_uid)
+        await bot.send(ev, f'【{current_name}】(UID:{existing_uid})已经在监控列表中了')
+        return
     
     try:
         results = await get_bilibili_search(up_name, "up")
@@ -143,27 +182,37 @@ async def watch_bilibili_up(bot, ev: CQEvent):
             return
         
         latest_video = results[0]
+        up_uid = str(latest_video['mid'])
+        current_name = latest_video['author']
+        
+        # 再次检查UID是否已存在
+        if watch_storage.get_up_name_by_uid(group_id, up_uid):
+            current_name = watch_storage.get_up_name_by_uid(group_id, up_uid)
+            await bot.send(ev, f'【{current_name}】(UID:{up_uid})已经在监控列表中了')
+            return
+        
         watch_storage.add_watch(
             group_id=group_id,
-            up_name=up_name,
+            up_name=current_name,
+            up_uid=up_uid,
             last_vid=latest_video['bvid']
         )
         
-        await bot.send(ev, f'✅ 成功关注UP主【{up_name}】\n最新视频: {latest_video["title"]}\n将监控后续更新')
+        await bot.send(ev, f'✅ 成功关注UP主【{current_name}】(UID:{up_uid})\n最新视频: {latest_video["title"]}\n将监控后续更新')
     except Exception as e:
         await bot.send(ev, f'关注失败: {str(e)}')
 
 @sv.on_prefix('取关up')
 async def unwatch_bilibili_up(bot, ev: CQEvent):
-    up_name = ev.message.extract_plain_text().strip()
+    up_name_or_uid = ev.message.extract_plain_text().strip()
     group_id = ev.group_id
     
-    if up_name not in watch_storage.get_group_watches(group_id):
-        await bot.send(ev, f'未找到【{up_name}】的监控记录')
+    removed_uid = watch_storage.remove_watch(group_id, up_name_or_uid)
+    if not removed_uid:
+        await bot.send(ev, f'未找到【{up_name_or_uid}】的监控记录')
         return
     
-    watch_storage.remove_watch(group_id, up_name)
-    await bot.send(ev, f'✅ 已取消对【{up_name}】的监控')
+    await bot.send(ev, f'✅ 已取消对UID【{removed_uid}】的监控')
 
 @sv.on_fullmatch('查看关注')
 async def list_watched_ups(bot, ev: CQEvent):
@@ -175,9 +224,9 @@ async def list_watched_ups(bot, ev: CQEvent):
         return
     
     up_list = ["📢 当前监控的UP主列表:", "━━━━━━━━━━━━━━━━━━"]
-    for up_name, info in watches.items():
+    for up_uid, info in watches.items():
         last_check = datetime.fromisoformat(info['last_check']).strftime('%m-%d %H:%M')
-        up_list.append(f"👤 {up_name} | 最后检查: {last_check}")
+        up_list.append(f"👤 {info['up_name']} (UID:{up_uid}) | 最后检查: {last_check}")
         up_list.append("━━━━━━━━━━━━━━━━━━")
     
     await bot.send(ev, "\n".join(up_list))
@@ -227,7 +276,7 @@ async def search_bilibili_up(bot, ev: CQEvent):
             await bot.finish(ev, f'未找到UP主【{up_name}】的视频')
             return
 
-        reply = [f"👤 {results[0]['author']} 的搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
+        reply = [f"👤 {results[0]['author']} (UID:{results[0]['mid']}) 的搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
         for i, video in enumerate(results, 1):
             pub_time = time.strftime("%Y-%m-%d", time.localtime(video['pubdate']))
             reply.extend([
@@ -251,19 +300,24 @@ async def check_up_updates():
     
     for group_id_str, up_dict in all_watches.items():
         group_id = int(group_id_str)
-        for up_name, info in up_dict.items():
+        for up_uid, info in up_dict.items():
             try:
-                results = await get_bilibili_search(up_name, "up")
+                current_up_name = info['up_name']
+                results = await get_bilibili_search(current_up_name, "up")
                 if not results:
                     continue
                 
                 latest_video = results[0]
                 current_time = datetime.now()
                 
-                if latest_video['bvid'] != info.get('last_vid'):
+                # 检查UP主是否改名
+                new_name = latest_video['author']
+                name_changed = new_name.lower() != current_up_name.lower()
+                
+                if latest_video['bvid'] != info.get('last_vid') or name_changed:
                     pub_time = time.strftime("%Y-%m-%d %H:%M", time.localtime(latest_video['pubdate']))
                     msg = [
-                        f"📢 UP主【{up_name}】发布了新视频！",
+                        f"📢 UP主【{new_name if name_changed else current_up_name}】(UID:{up_uid})发布了新视频！",
                         f"标题: {latest_video['title']}",
                         f"发布时间: {pub_time}",
                         f"视频链接: https://b23.tv/{latest_video['bvid']}",
@@ -272,14 +326,18 @@ async def check_up_updates():
                     
                     watch_storage.update_last_video(
                         group_id=group_id,
-                        up_name=up_name,
-                        last_vid=latest_video['bvid']
+                        up_uid=up_uid,
+                        last_vid=latest_video['bvid'],
+                        new_name=new_name if name_changed else None
                     )
+                    
+                    if name_changed:
+                        msg.insert(1, f"⚠️ 注意：UP主已从【{current_up_name}】改名为【{new_name}】")
                     
                     await bot.send_group_msg(group_id=group_id, message="\n".join(msg))
                 
             except Exception as e:
-                sv.logger.error(f'监控UP主【{up_name}】失败: {str(e)}')
+                sv.logger.error(f'监控UP主UID【{up_uid}】失败: {str(e)}')
                 continue
 
 @sv.scheduled_job('interval', minutes=3)
