@@ -347,85 +347,133 @@ async def check_up_updates():
         for up_name, info in up_dict.items():
             try:
                 last_vid = info.get('last_vid')
+                last_check_time = datetime.fromisoformat(info['last_check'])
                 sv.logger.info(f"检查UP主【{up_name}】更新，上次记录视频: {last_vid or '无'}")
 
-                # 1. 使用查视频功能搜索UP主名称
-                search_results = await get_bilibili_search(up_name, "video")
-                if not search_results:
+                # 通过查视频功能获取UP主视频
+                results = await get_bilibili_search(up_name, "video")
+                if not results:
                     sv.logger.warning(f"未找到【{up_name}】的视频")
                     continue
                 
-                # 2. 严格筛选UP主名称完全匹配的视频（最多5个）
-                matched_videos = [
-                    video for video in search_results[:5]  # 只检查前5个结果
-                    if normalize_name(video['author']) == normalize_name(up_name)
-                ]
+                # 筛选出完全匹配UP主名称的视频
+                matched_videos = []
+                for video in results:
+                    # 严格名称匹配
+                    if normalize_name(video['author']) == normalize_name(up_name):
+                        matched_videos.append(video)
                 
                 if not matched_videos:
-                    sv.logger.info(f"未找到UP主名称完全匹配【{up_name}】的视频")
+                    sv.logger.info(f"未找到完全匹配【{up_name}】的视频")
                     continue
                 
-                # 3. 从匹配结果中获取最新视频
+                # 获取最新视频
                 latest_video = max(matched_videos, key=lambda x: x['pubdate'])
                 current_bvid = latest_video['bvid']
                 video_pub_time = datetime.fromtimestamp(latest_video['pubdate'])
                 
-                # 4. 验证是否为新视频
+                # 验证是否为新视频
+                is_new = False
+                reason = ""
+                
                 if not last_vid:
                     is_new = True
                     reason = "首次监控该UP主"
                 else:
-                    is_new, reason = await verify_new_video(last_vid, current_bvid, video_pub_time)
+                    # 1. 检查BV号是否相同
+                    if current_bvid == last_vid:
+                        reason = "BV号相同，视频未更新"
+                    else:
+                        # 2. 获取上次视频信息
+                        last_video_info = await get_video_info(last_vid)
+                        if not last_video_info:
+                            reason = "无法获取上次视频信息，保守处理不推送"
+                        else:
+                            last_pub_time = datetime.fromtimestamp(last_video_info['pubdate'])
+                            # 3. 比较发布时间（增加2分钟缓冲）
+                            if video_pub_time > (last_pub_time + timedelta(minutes=2)):
+                                is_new = True
+                                reason = (f"新视频发布时间({video_pub_time}) > "
+                                         f"上次视频发布时间({last_pub_time})")
+                            else:
+                                reason = "无新发布(发布时间未超过阈值)"
                 
                 sv.logger.info(f"更新判断: {reason}")
                 
-                # 5. 如果是新视频则推送
+                # 如果是新视频则更新记录并推送
                 if is_new:
-                    await send_new_video_notice(bot, group_id, up_name, latest_video)
-                    watch_storage.update_last_video(group_id, up_name, current_bvid)
+                    watch_storage.update_last_video(
+                        group_id=group_id,
+                        up_name=up_name,
+                        last_vid=current_bvid
+                    )
+                    
+                    # 准备通知内容
+                    pub_time = video_pub_time.strftime("%Y-%m-%d %H:%M")
+                    pic_url = latest_video['pic']
+                    if not pic_url.startswith(('http://', 'https://')):
+                        pic_url = 'https:' + pic_url
+                    proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.replace("https://", "").replace("http://", ""), safe="")}'
+                    
+                    msg = [
+                        f"📢 UP主【{up_name}】发布了新视频！",
+                        f"📺 标题: {latest_video['title']}",
+                        f"[CQ:image,file={proxied_url}]",
+                        f"⏰ 发布时间: {pub_time}",
+                        f"🔗 视频链接: https://b23.tv/{current_bvid}"
+                    ]
+                    
+                    await bot.send_group_msg(group_id=group_id, message="\n".join(msg))
                     update_count += 1
+                    sv.logger.info(f"已发送新视频通知: {up_name} - {latest_video['title']}")
                 
             except Exception as e:
                 sv.logger.error(f'监控UP主【{up_name}】失败: {str(e)}')
                 continue
     
-    sv.logger.info(f"监控检查完成，共检查 {len(all_watches)} 个UP主，发现 {update_count} 个更新")
+    sv.logger.info(f"监控检查完成，共检查 {sum(len(v) for v in all_watches.values())} 个UP主，发现 {update_count} 个更新")
 
-async def verify_new_video(last_vid: str, current_bvid: str, video_pub_time: datetime) -> Tuple[bool, str]:
-    """验证是否为新视频"""
-    # 1. 检查BV号是否相同
-    if current_bvid == last_vid:
-        return False, "BV号相同，视频未更新"
-    
-    # 2. 获取上次视频信息
-    last_video_info = await get_video_info(last_vid)
-    if not last_video_info:
-        return False, "无法获取上次视频信息，保守处理不推送"
-    
-    last_pub_time = datetime.fromtimestamp(last_video_info['pubdate'])
-    
-    # 3. 比较发布时间（增加2分钟缓冲）
-    if video_pub_time > (last_pub_time + timedelta(minutes=2)):
-        return True, f"新视频发布时间({video_pub_time}) > 上次视频发布时间({last_pub_time})"
-    else:
-        return False, f"发布时间未超过阈值: {video_pub_time} ≤ {last_pub_time}+2分钟"
+async def get_bilibili_search(keyword: str, search_type: str = "video") -> list:
+    """搜索B站视频"""
+    cache_key = f"{search_type}:{normalize_name(keyword)}"
+    if cache_key in search_cache:
+        cached_data, timestamp = search_cache[cache_key]
+        if datetime.now() - timestamp < timedelta(minutes=CACHE_EXPIRE_MINUTES):
+            return cached_data[:MAX_RESULTS]
 
-async def send_new_video_notice(bot, group_id: int, up_name: str, video_info: dict):
-    """发送新视频通知"""
-    pub_time = datetime.fromtimestamp(video_info['pubdate']).strftime("%Y-%m-%d %H:%M")
-    pic_url = f"https:{video_info['pic']}" if not video_info['pic'].startswith(('http://', 'https://')) else video_info['pic']
-    proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.replace("https://", "").replace("http://", ""), safe="")}'
-    
-    msg = [
-        f"📢 UP主【{up_name}】发布了新视频！",
-        f"📺 标题: {video_info['title']}",
-        f"[CQ:image,file={proxied_url}]",
-        f"⏰ 发布时间: {pub_time}",
-        f"🔗 视频链接: https://b23.tv/{video_info['bvid']}"
-    ]
-    
-    await bot.send_group_msg(group_id=group_id, message="\n".join(msg))
-    sv.logger.info(f"已发送新视频通知: {up_name} - {video_info['title']}")
+    params = {
+        'search_type': 'video',
+        'keyword': keyword,
+        'order': 'pubdate',
+        'ps': MAX_RESULTS,
+        'platform': 'web'
+    }
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        'Referer': 'https://www.bilibili.com/',
+        'Origin': 'https://www.bilibili.com',
+        'Cookie': 'buvid3=XXXXXX;'
+    }
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(
+                'https://api.bilibili.com/x/web-interface/search/type',
+                params=params,
+                headers=headers,
+                timeout=10
+            ) as resp:
+                if resp.status != 200:
+                    sv.logger.error(f"搜索请求失败: HTTP {resp.status}")
+                    return []
+                data = await resp.json()
+                if data.get('code') == 0:
+                    results = data['data'].get('result', [])[:MAX_RESULTS]
+                    search_cache[cache_key] = (results, datetime.now())
+                    return results
+        except Exception as e:
+            sv.logger.error(f"搜索失败: {str(e)}")
+        return []
         
 @sv.on_prefix('查视频')
 async def search_bilibili_video(bot, ev: CQEvent):
