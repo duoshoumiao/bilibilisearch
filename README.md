@@ -12,6 +12,12 @@ B站视频搜索
 
 更新 关注up 封面显示
 
+主要优化内容：
+
+​​双重验证机制​​：
+第一重：BV号直接对比，相同则绝对不推送
+第二重：不同BV号时，再比较发布时间，确保新视频确实发布时间更晚
+
 <img width="400" height="818" alt="image" src="https://github.com/user-attachments/assets/0c280011-b16a-41fb-ab0b-8eeb9cf401d5" />
 
 <img width="458" height="821" alt="image" src="https://github.com/user-attachments/assets/b19dbf50-f50e-4124-837d-67f2425934fe" />
