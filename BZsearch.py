@@ -408,6 +408,44 @@ async def check_up_updates():
             except Exception as e:
                 sv.logger.error(f'监控UP主【{up_name}】失败: {str(e)}')
 
+@sv.on_prefix('查视频')
+async def search_bilibili_video(bot, ev: CQEvent):
+    keyword = ev.message.extract_plain_text().strip()
+    if not keyword:
+        await bot.send(ev, '请输入搜索关键词，例如：查视频 原神')
+        return
+    
+    try:
+        msg_id = (await bot.send(ev, "🔍🔍🔍🔍 搜索中..."))['message_id']
+        results = await get_bilibili_search(keyword, "video")
+        
+        if not results:
+            await bot.finish(ev, f'未找到"{keyword}"相关视频')
+            return
+
+        reply = ["📺📺📺📺 搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
+        for i, video in enumerate(results, 1):
+            clean_title = re.sub(r'<[^>]+>', '', video['title'])
+            pub_time = time.strftime("%Y-%m-%d", time.localtime(video['pubdate']))
+            
+            # 处理图片URL
+            pic_url = video['pic']
+            if not pic_url.startswith(('http://', 'https://')):
+                pic_url = 'https:' + pic_url
+            proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.replace("https://", "").replace("http://", ""), safe="")}'
+            
+            reply.extend([
+                f"{i}. {clean_title}",
+                f"[CQ:image,file={proxied_url}]",  # 图片放在标题下方
+                f"   📅📅📅📅 {pub_time} | 👤👤👤👤 {video['author']}",
+                f"   🔗🔗🔗🔗 https://b23.tv/{video['bvid']}",
+                "━━━━━━━━━━━━━━━━━━"
+            ])
+        
+        await safe_send(bot, ev, "\n".join(reply))
+    except Exception as e:
+        await bot.send(ev, f'搜索失败: {str(e)}')
+
 @sv.scheduled_job('interval', minutes=3)
 async def clear_cache():
     global search_cache
