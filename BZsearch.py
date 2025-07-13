@@ -335,45 +335,70 @@ async def check_up_updates():
             try:
                 last_vid = info.get('last_vid')
                 last_check_time = datetime.fromisoformat(info['last_check'])
-                sv.logger.info(f"检查UP主【{up_name}】更新，上次记录视频: {last_vid}")
-                
-                # 使用查视频功能获取UP主最新视频
+                sv.logger.info(f"检查UP主【{up_name}】更新，上次记录视频: {last_vid or '无'}")
+
+                # 获取UP主最新视频（通过搜索功能）
                 results = await get_bilibili_search(up_name, "video")
                 if not results:
                     sv.logger.warning(f"未找到【{up_name}】的视频")
                     continue
                 
-                # 筛选出完全匹配UP主名称的视频
-                matched_videos = [v for v in results if normalize_name(v['author']) == normalize_name(up_name)]
+                # 严格匹配UP主名称
+                matched_videos = []
+                for video in results:
+                    # 多重名称匹配规则
+                    current_author = normalize_name(video['author'])
+                    target_author = normalize_name(up_name)
+                    if (current_author == target_author or 
+                        current_author.replace(' ', '') == target_author.replace(' ', '')):
+                        matched_videos.append(video)
+                
                 if not matched_videos:
                     sv.logger.info(f"未找到完全匹配【{up_name}】的视频")
                     continue
                 
                 latest_video = matched_videos[0]
+                current_bvid = latest_video['bvid']
                 video_pub_time = datetime.fromtimestamp(latest_video['pubdate'])
                 
-                # 检查是否为新视频
+                # 双重验证机制：BV号对比 + 发布时间验证
                 is_new = False
+                reason = ""
+                
                 if not last_vid:
+                    # 首次监控，直接记录
                     is_new = True
-                    reason = "首次监控"
+                    reason = "首次监控该UP主"
                 else:
-                    last_video_info = await get_video_info(last_vid)
-                    if not last_video_info:
-                        is_new = True
-                        reason = "无法获取上次视频信息"
+                    # 情况1：BV号相同 -> 不是新视频
+                    if current_bvid == last_vid:
+                        reason = "BV号相同，视频未更新"
                     else:
-                        last_pub_time = datetime.fromtimestamp(last_video_info['pubdate'])
-                        is_new = video_pub_time > last_pub_time
-                        reason = f"新发布时间({video_pub_time}) > 上次发布时间({last_pub_time})" if is_new else "无新发布"
+                        # 获取上次视频的详细信息
+                        last_video_info = await get_video_info(last_vid)
+                        if not last_video_info:
+                            # 无法获取上次视频信息，保守策略：不推送
+                            reason = "无法获取上次视频信息，保守处理不推送"
+                        else:
+                            last_pub_time = datetime.fromtimestamp(last_video_info['pubdate'])
+                            
+                            # 情况2：新视频发布时间更早 -> 可能是搜索排序问题，不推送
+                            if video_pub_time <= last_pub_time:
+                                reason = (f"当前视频发布时间({video_pub_time}) ≤ "
+                                         f"上次视频发布时间({last_pub_time})")
+                            else:
+                                # 情况3：确实是新视频
+                                is_new = True
+                                reason = (f"新视频BV:{current_bvid}发布时间({video_pub_time}) > "
+                                         f"上次视频BV:{last_vid}发布时间({last_pub_time})")
                 
                 sv.logger.info(f"更新判断: {reason}")
                 
-                # 无论是否有更新，都更新最后检查时间和视频ID
+                # 更新最后检查时间（无论是否有新视频）
                 watch_storage.update_last_video(
                     group_id=group_id,
                     up_name=up_name,
-                    last_vid=latest_video['bvid']
+                    last_vid=current_bvid  # 总是更新为当前找到的最新BV号
                 )
                 
                 if is_new:
@@ -389,7 +414,7 @@ async def check_up_updates():
                         f"📺 标题: {latest_video['title']}",
                         f"[CQ:image,file={proxied_url}]",
                         f"⏰ 发布时间: {pub_time}",
-                        f"🔗 视频链接: https://b23.tv/{latest_video['bvid']}"
+                        f"🔗 视频链接: https://b23.tv/{current_bvid}"
                     ]
                     
                     await bot.send_group_msg(group_id=group_id, message="\n".join(msg))
