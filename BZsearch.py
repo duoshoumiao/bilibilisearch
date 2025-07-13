@@ -3,9 +3,10 @@ import json
 import re
 import time
 import asyncio
+import difflib
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from urllib.parse import quote
 
 from hoshino import Service, priv
@@ -13,12 +14,13 @@ from hoshino.typing import CQEvent
 import aiohttp
 
 # 主服务定义
-sv = Service('b站视频搜索', enable_on_default=True, help_='搜索B站视频\n使用方法：\n1. 查视频 [关键词] - 搜索B站视频\n2. 查up [UP主名称] - 搜索UP主视频\n3. 关注up [UP主名称] - 监控UP主新视频\n4. 取关up [UP主名称/UID] - 取消监控\n5.视频关注+链接也可关注up\n6. 查看关注 - 查看当前监控列表')
+sv = Service('b站视频搜索', enable_on_default=True, help_='搜索B站视频\n使用方法：\n1. 查视频 [关键词] - 搜索B站视频\n2. 查up [UP主名称] - 搜索UP主视频\n3. 关注up [UP主名称] - 监控UP主新视频\n4. 通过视频关注 [视频链接] - 通过视频链接关注UP主\n5. 取关up [UP主名称/UID] - 取消监控\n6. 查看关注 - 查看当前监控列表')
 
 # 配置项
 MAX_RESULTS = 5
 UP_WATCH_INTERVAL = 10
 CACHE_EXPIRE_MINUTES = 3
+NAME_SIMILARITY_THRESHOLD = 0.6  # 名称相似度阈值
 search_cache = {}
 
 # JSON存储文件路径
@@ -116,7 +118,20 @@ class UpWatchStorage:
 # 全局存储实例
 watch_storage = UpWatchStorage()
 
-async def get_bilibili_search(keyword: str, search_type: str = "video"):
+def is_name_similar(old_name: str, new_name: str, threshold=NAME_SIMILARITY_THRESHOLD) -> bool:
+    """检查两个名称是否相似，防止账号转让等情况"""
+    old_name = old_name.lower().strip()
+    new_name = new_name.lower().strip()
+    
+    # 完全匹配
+    if old_name == new_name:
+        return True
+    
+    # 相似度检查
+    similarity = difflib.SequenceMatcher(None, old_name, new_name).ratio()
+    return similarity >= threshold
+
+async def get_bilibili_search(keyword: str, search_type: str = "video") -> list:
     cache_key = f"{search_type}:{keyword.lower()}"
     if cache_key in search_cache:
         cached_data, timestamp = search_cache[cache_key]
@@ -144,7 +159,7 @@ async def get_bilibili_search(keyword: str, search_type: str = "video"):
                 timeout=10
             ) as resp:
                 if resp.status != 200:
-                    return None
+                    return []
                 data = await resp.json()
                 if data.get('code') == 0:
                     results = data['data'].get('result', [])[:MAX_RESULTS]
@@ -166,6 +181,25 @@ async def get_bilibili_search(keyword: str, search_type: str = "video"):
         except Exception as e:
             sv.logger.error(f"搜索失败: {str(e)}")
         return []
+
+async def get_video_info(bvid: str) -> Optional[Dict]:
+    """获取视频详细信息"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+    }
+    url = f'https://api.bilibili.com/x/web-interface/view?bvid={bvid}'
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                if data.get('code') == 0:
+                    return data['data']
+        except Exception:
+            return None
+    return None
 
 async def safe_send(bot, ev, message):
     """安全发送消息，防止消息体解析错误"""
@@ -248,6 +282,57 @@ async def watch_bilibili_up(bot, ev: CQEvent):
     except Exception as e:
         await bot.send(ev, f'关注失败: {str(e)}')
 
+@sv.on_prefix('通过视频关注')
+async def watch_by_video(bot, ev: CQEvent):
+    """通过视频链接关注UP主"""
+    video_url = ev.message.extract_plain_text().strip()
+    if not video_url:
+        await bot.send(ev, '请输入视频链接，例如：通过视频关注 https://www.bilibili.com/video/BV1xxx')
+        return
+    
+    # 提取BV号
+    bvid = None
+    if 'bilibili.com/video/' in video_url:
+        match = re.search(r'bilibili\.com/video/(BV[0-9A-Za-z]+)', video_url)
+        if match:
+            bvid = match.group(1)
+    
+    if not bvid:
+        await bot.send(ev, '无法从链接中识别视频BV号，请确认链接格式正确')
+        return
+    
+    group_id = ev.group_id
+    
+    try:
+        # 获取视频信息
+        video_info = await get_video_info(bvid)
+        if not video_info:
+            await bot.send(ev, '获取视频信息失败，请稍后再试')
+            return
+        
+        up_uid = str(video_info['owner']['mid'])
+        up_name = video_info['owner']['name']
+        
+        # 检查是否已关注
+        if watch_storage.get_up_name_by_uid(group_id, up_uid):
+            await bot.send(ev, f'【{up_name}】(UID:{up_uid})已在监控列表中')
+            return
+        
+        # 添加到监控
+        watch_storage.add_watch(
+            group_id=group_id,
+            up_name=up_name,
+            up_uid=up_uid,
+            last_vid=bvid
+        )
+        
+        await bot.send(ev, f'✅ 已通过视频关注UP主【{up_name}】(UID:{up_uid})\n'
+                         f'视频标题: {video_info["title"]}\n'
+                         '将监控后续更新')
+        
+    except Exception as e:
+        await bot.send(ev, f'通过视频关注失败: {str(e)}')
+
 @sv.on_prefix('取关up')
 async def unwatch_bilibili_up(bot, ev: CQEvent):
     up_name_or_uid = ev.message.extract_plain_text().strip()
@@ -314,76 +399,6 @@ async def search_bilibili_video(bot, ev: CQEvent):
         await safe_send(bot, ev, "\n".join(reply))
     except Exception as e:
         await bot.send(ev, f'搜索失败: {str(e)}')
-
-@sv.on_prefix('视频关注')
-async def watch_by_video(bot, ev: CQEvent):
-    """通过视频链接关注UP主"""
-    video_url = ev.message.extract_plain_text().strip()
-    if not video_url:
-        await bot.send(ev, '请输入视频链接，例如：通过视频关注 https://www.bilibili.com/video/BV1xxx')
-        return
-    
-    # 提取BV号
-    bvid = None
-    if 'bilibili.com/video/' in video_url:
-        match = re.search(r'bilibili\.com/video/(BV[0-9A-Za-z]+)', video_url)
-        if match:
-            bvid = match.group(1)
-    
-    if not bvid:
-        await bot.send(ev, '无法从链接中识别视频BV号，请确认链接格式正确')
-        return
-    
-    group_id = ev.group_id
-    
-    try:
-        # 获取视频信息
-        video_info = await get_video_info(bvid)
-        if not video_info:
-            await bot.send(ev, '获取视频信息失败，请稍后再试')
-            return
-        
-        up_uid = str(video_info['owner']['mid'])
-        up_name = video_info['owner']['name']
-        
-        # 检查是否已关注
-        if watch_storage.get_up_name_by_uid(group_id, up_uid):
-            await bot.send(ev, f'【{up_name}】(UID:{up_uid})已在监控列表中')
-            return
-        
-        # 添加到监控
-        watch_storage.add_watch(
-            group_id=group_id,
-            up_name=up_name,
-            up_uid=up_uid,
-            last_vid=bvid
-        )
-        
-        await bot.send(ev, f'✅ 已通过视频关注UP主【{up_name}】(UID:{up_uid})\n'
-                         f'视频标题: {video_info["title"]}\n'
-                         '将监控后续更新')
-        
-    except Exception as e:
-        await bot.send(ev, f'通过视频关注失败: {str(e)}')
-
-async def get_video_info(bvid: str) -> Optional[Dict]:
-    """获取视频详细信息"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-    }
-    url = f'https://api.bilibili.com/x/web-interface/view?bvid={bvid}'
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                if data.get('code') == 0:
-                    return data['data']
-        except Exception:
-            return None
-    return None
         
 @sv.on_prefix('查up')
 async def search_bilibili_up(bot, ev: CQEvent):
@@ -478,13 +493,31 @@ async def check_up_updates():
                                 latest_video = video
                                 break
                 
-                # 最终确认是否找到有效视频
-                if not latest_video or str(latest_video.get('mid')) != up_uid:
+                # 最终验证
+                if not latest_video:
                     sv.logger.warning(f'无法确认UP主UID【{up_uid}】是否有更新，可能已删除账号或更改隐私设置')
                     continue
                 
-                current_time = datetime.now()
+                # 严格验证UID匹配
+                if str(latest_video.get('mid')) != up_uid:
+                    sv.logger.warning(f'UP主UID不匹配！监控UID:{up_uid}，视频UID:{latest_video.get("mid")}')
+                    continue
+                
+                # 名称相似度检查
                 new_name = latest_video['author']
+                if not is_name_similar(current_up_name, new_name):
+                    sv.logger.warning(f'UP主名称变化过大！原名称:{current_up_name}，新名称:{new_name}')
+                    # 发送警告通知
+                    await bot.send_group_msg(
+                        group_id=group_id,
+                        message=f"⚠️ UP主UID【{up_uid}】名称变化过大！\n"
+                               f"原名称: {current_up_name}\n"
+                               f"新名称: {new_name}\n"
+                               "可能是账号已转让，建议手动确认并重新关注"
+                    )
+                    continue
+                
+                current_time = datetime.now()
                 name_changed = new_name.lower() != current_up_name.lower()
                 
                 # 严格检查视频是否为新发布的
