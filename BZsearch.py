@@ -440,11 +440,10 @@ async def check_up_updates():
                 last_check_time = datetime.fromisoformat(info['last_check'])
                 sv.logger.info(f"检查UP主【{up_name}】更新，上次记录视频: {last_vid}")
                 
-                # 方法1：优先使用搜索API（与查up功能相同的方式）
+                # 获取最新视频
                 results = await get_bilibili_search(up_name, "up")
                 if not results:
                     sv.logger.warning(f"搜索API未找到【{up_name}】的视频，尝试空间API")
-                    # 方法2：备用方案 - 使用空间API
                     up_info = await get_up_info_by_name(up_name)
                     if not up_info:
                         continue
@@ -454,7 +453,7 @@ async def check_up_updates():
                     latest_video = videos[0]
                     video_pub_time = datetime.fromtimestamp(latest_video['pubdate'])
                 else:
-                    # 确保找到的视频确实是该UP主的（名称完全匹配）
+                    # 确保找到的视频确实是该UP主的
                     latest_video = None
                     for video in results:
                         if normalize_name(video['author']) == normalize_name(up_name):
@@ -464,15 +463,12 @@ async def check_up_updates():
                         continue
                     video_pub_time = datetime.fromtimestamp(latest_video['pubdate'])
                 
-                sv.logger.info(f"找到最新视频: {latest_video['bvid']} 标题: {latest_video['title']} 发布时间: {video_pub_time}")
-                
                 # 检查是否为新视频
                 is_new = False
-                if not last_vid:  # 第一次监控
+                if not last_vid:
                     is_new = True
                     reason = "首次监控"
                 else:
-                    # 获取上次视频的发布时间
                     last_video_info = await get_video_info(last_vid)
                     if not last_video_info:
                         is_new = True
@@ -484,8 +480,15 @@ async def check_up_updates():
                 
                 sv.logger.info(f"更新判断: {reason}")
                 
+                # 无论是否有更新，都更新最后检查时间和视频ID
+                watch_storage.update_last_video(
+                    group_id=group_id,
+                    up_name=up_name,
+                    last_vid=latest_video['bvid']  # 总是使用最新找到的视频ID
+                )
+                
                 if is_new:
-                    # 准备消息内容
+                    # 准备并发送通知
                     pub_time = video_pub_time.strftime("%Y-%m-%d %H:%M")
                     pic_url = latest_video['pic']
                     if not pic_url.startswith(('http://', 'https://')):
@@ -500,31 +503,16 @@ async def check_up_updates():
                         f"🔗 视频链接: https://b23.tv/{latest_video['bvid']}"
                     ]
                     
-                    # 更新记录
-                    watch_storage.update_last_video(
-                        group_id=group_id,
-                        up_name=up_name,
-                        last_vid=latest_video['bvid']
-                    )
-                    
-                    # 发送通知
                     await bot.send_group_msg(group_id=group_id, message="\n".join(msg))
                     update_count += 1
                     sv.logger.info(f"已发送新视频通知: {up_name} - {latest_video['title']}")
-                
-                # 无论是否有更新，都更新最后检查时间
-                watch_storage.update_last_video(
-                    group_id=group_id,
-                    up_name=up_name,
-                    last_vid=last_vid or latest_video['bvid']
-                )
                 
             except Exception as e:
                 sv.logger.error(f'监控UP主【{up_name}】失败: {str(e)}')
                 continue
     
     sv.logger.info(f"监控检查完成，共检查 {sum(len(v) for v in all_watches.values())} 个UP主，发现 {update_count} 个更新")
-
+    
 @sv.on_prefix('查视频')
 async def search_bilibili_video(bot, ev: CQEvent):
     keyword = ev.message.extract_plain_text().strip()
