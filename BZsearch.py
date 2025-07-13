@@ -13,7 +13,7 @@ from hoshino.typing import CQEvent
 import aiohttp
 
 # 主服务定义
-sv = Service('b站视频搜索', enable_on_default=True, help_='搜索B站视频\n使用方法：\n1. 查视频 [关键词] - 搜索B站视频\n2. 查up [UP主名称] - 搜索UP主视频\n3. 关注up [UP主名称] - 监控UP主新视频\n4. 视频关注 [视频链接] - 通过视频链接关注UP主\n5. 取关up [UP主名称] - 取消监控\n6. 查看关注 - 查看当前监控列表')
+sv = Service('b站视频搜索', enable_on_default=True, help_='搜索B站视频\n使用方法：\n1. 查视频 [关键词] - 搜索B站视频\n2. 视频关注 [视频链接] - 通过视频链接关注UP主\n3. 取关up [UP主名称] - 取消监控\n4. 查看关注 - 查看当前监控列表')
 
 # 配置项
 MAX_RESULTS = 5
@@ -150,69 +150,30 @@ def normalize_name(name: str) -> str:
     """标准化名称(去前后空格/小写)"""
     return name.strip().lower()
 
-async def get_up_info_by_name(name: str) -> Optional[Dict]:
-    """通过名称获取UP主信息(搜索API)"""
-    url = "https://api.bilibili.com/x/web-interface/search/type"
-    params = {
-        'search_type': 'bili_user',
-        'keyword': name,
-        'page_size': 1
-    }
+async def get_video_info(bvid: str) -> Optional[Dict]:
+    """获取视频详细信息"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        'Referer': 'https://www.bilibili.com/',
-        'Origin': 'https://www.bilibili.com',
-        'Accept': 'application/json, text/plain, */*',
-        'Cookie': 'buvid3=XXXXXX;'  # 添加必要的cookie
+        'Referer': f'https://www.bilibili.com/video/{bvid}'
     }
+    url = f'https://api.bilibili.com/x/web-interface/view?bvid={bvid}'
     
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, params=params, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('code') == 0 and data['data'].get('result'):
-                        for user in data['data']['result']:
-                            if normalize_name(user['uname']) == normalize_name(name):
-                                return {
-                                    'mid': str(user['mid']),
-                                    'name': user['uname']
-                                }
+            sv.logger.info(f"获取视频信息: BV{bvid}")
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status != 200:
+                    sv.logger.error(f"获取视频信息失败: HTTP {resp.status}")
+                    return None
+                data = await resp.json()
+                if data.get('code') == 0:
+                    sv.logger.info(f"成功获取视频信息: {data['data']['title']}")
+                    return data['data']
+                else:
+                    sv.logger.error(f"视频API返回错误: {data.get('message')}")
         except Exception as e:
-            sv.logger.error(f"获取UP主信息失败: {str(e)}")
+            sv.logger.error(f"获取视频信息异常: {str(e)}")
     return None
-
-async def get_up_videos(mid: str) -> list:
-    """获取UP主空间视频列表"""
-    url = "https://api.bilibili.com/x/space/wbi/arc/search"
-    params = {
-        'mid': mid,
-        'ps': MAX_RESULTS,
-        'order': 'pubdate'
-    }
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        'Referer': f'https://space.bilibili.com/{mid}/',
-        'Origin': 'https://space.bilibili.com',
-        'Cookie': 'buvid3=XXXXXX;'  # 添加必要的cookie
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, params=params, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('code') == 0:
-                        return [{
-                            'bvid': v['bvid'],
-                            'title': v['title'],
-                            'author': data['data']['list']['name'],
-                            'pubdate': v['created'],
-                            'pic': v['pic']
-                        } for v in data['data']['list']['vlist']]
-        except Exception as e:
-            sv.logger.error(f"获取UP主视频失败: {str(e)}")
-    return []
 
 async def get_bilibili_search(keyword: str, search_type: str = "video") -> list:
     cache_key = f"{search_type}:{normalize_name(keyword)}"
@@ -261,31 +222,6 @@ async def get_bilibili_search(keyword: str, search_type: str = "video") -> list:
             sv.logger.error(f"搜索失败: {str(e)}")
         return []
 
-async def get_video_info(bvid: str) -> Optional[Dict]:
-    """获取视频详细信息"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        'Referer': f'https://www.bilibili.com/video/{bvid}'
-    }
-    url = f'https://api.bilibili.com/x/web-interface/view?bvid={bvid}'
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            sv.logger.info(f"获取视频信息: BV{bvid}")
-            async with session.get(url, headers=headers, timeout=10) as resp:
-                if resp.status != 200:
-                    sv.logger.error(f"获取视频信息失败: HTTP {resp.status}")
-                    return None
-                data = await resp.json()
-                if data.get('code') == 0:
-                    sv.logger.info(f"成功获取视频信息: {data['data']['title']}")
-                    return data['data']
-                else:
-                    sv.logger.error(f"视频API返回错误: {data.get('message')}")
-        except Exception as e:
-            sv.logger.error(f"获取视频信息异常: {str(e)}")
-    return None
-
 async def safe_send(bot, ev, message):
     """安全发送消息"""
     try:
@@ -298,45 +234,6 @@ async def safe_send(bot, ev, message):
         await bot.send(ev, message)
     except Exception as e:
         sv.logger.error(f'发送消息失败: {str(e)}')
-
-@sv.on_prefix('关注up')
-async def watch_bilibili_up(bot, ev: CQEvent):
-    up_name = ev.message.extract_plain_text().strip()
-    if not up_name:
-        await bot.send(ev, '请输入UP主名称，例如：关注up 老番茄')
-        return
-    
-    group_id = ev.group_id
-    
-    # 检查是否已关注
-    if watch_storage.find_up_by_name(up_name):
-        await bot.send(ev, f'【{up_name}】已在监控列表中')
-        return
-    
-    # 获取UP主信息
-    up_info = await get_up_info_by_name(up_name)
-    if not up_info:
-        await bot.send(ev, f'未找到UP主【{up_name}】，请确认名称是否正确')
-        return
-    
-    # 获取UP主最新视频
-    videos = await get_up_videos(up_info['mid'])
-    if not videos:
-        await bot.send(ev, f'UP主【{up_name}】没有发布过视频')
-        return
-    
-    latest_video = videos[0]
-    
-    # 添加到监控
-    watch_storage.add_watch(
-        group_id=group_id,
-        up_name=up_info['name'],
-        last_vid=latest_video['bvid']
-    )
-    
-    await bot.send(ev, f'✅ 已关注UP主【{up_info["name"]}】\n'
-                      f'最新视频: {latest_video["title"]}\n'
-                      '将监控后续更新')
 
 @sv.on_prefix('视频关注')
 async def watch_by_video(bot, ev: CQEvent):
@@ -440,28 +337,20 @@ async def check_up_updates():
                 last_check_time = datetime.fromisoformat(info['last_check'])
                 sv.logger.info(f"检查UP主【{up_name}】更新，上次记录视频: {last_vid}")
                 
-                # 获取最新视频
-                results = await get_bilibili_search(up_name, "up")
+                # 使用查视频功能获取UP主最新视频
+                results = await get_bilibili_search(up_name, "video")
                 if not results:
-                    sv.logger.warning(f"搜索API未找到【{up_name}】的视频，尝试空间API")
-                    up_info = await get_up_info_by_name(up_name)
-                    if not up_info:
-                        continue
-                    videos = await get_up_videos(up_info['mid'])
-                    if not videos:
-                        continue
-                    latest_video = videos[0]
-                    video_pub_time = datetime.fromtimestamp(latest_video['pubdate'])
-                else:
-                    # 确保找到的视频确实是该UP主的
-                    latest_video = None
-                    for video in results:
-                        if normalize_name(video['author']) == normalize_name(up_name):
-                            latest_video = video
-                            break
-                    if not latest_video:
-                        continue
-                    video_pub_time = datetime.fromtimestamp(latest_video['pubdate'])
+                    sv.logger.warning(f"未找到【{up_name}】的视频")
+                    continue
+                
+                # 筛选出完全匹配UP主名称的视频
+                matched_videos = [v for v in results if normalize_name(v['author']) == normalize_name(up_name)]
+                if not matched_videos:
+                    sv.logger.info(f"未找到完全匹配【{up_name}】的视频")
+                    continue
+                
+                latest_video = matched_videos[0]
+                video_pub_time = datetime.fromtimestamp(latest_video['pubdate'])
                 
                 # 检查是否为新视频
                 is_new = False
@@ -484,7 +373,7 @@ async def check_up_updates():
                 watch_storage.update_last_video(
                     group_id=group_id,
                     up_name=up_name,
-                    last_vid=latest_video['bvid']  # 总是使用最新找到的视频ID
+                    last_vid=latest_video['bvid']
                 )
                 
                 if is_new:
@@ -512,7 +401,7 @@ async def check_up_updates():
                 continue
     
     sv.logger.info(f"监控检查完成，共检查 {sum(len(v) for v in all_watches.values())} 个UP主，发现 {update_count} 个更新")
-    
+
 @sv.on_prefix('查视频')
 async def search_bilibili_video(bot, ev: CQEvent):
     keyword = ev.message.extract_plain_text().strip()
@@ -550,67 +439,6 @@ async def search_bilibili_video(bot, ev: CQEvent):
         await safe_send(bot, ev, "\n".join(reply))
     except Exception as e:
         await bot.send(ev, f'搜索失败: {str(e)}')
-
-@sv.on_prefix('查up')
-async def search_bilibili_up(bot, ev: CQEvent):
-    up_name = ev.message.extract_plain_text().strip()
-    if not up_name:
-        await bot.send(ev, '请输入UP主名称，例如：查up 老番茄')
-        return
-
-    try:
-        msg_id = (await bot.send(ev, f"正在搜索【{up_name}】的最新视频..."))['message_id']
-        
-        results = await get_bilibili_search(up_name, "up")
-        if not results:
-            await bot.finish(ev, f'未找到UP主【{up_name}】的视频')
-            return
-
-        # 严格名称匹配检查
-        exact_matches = [
-            v for v in results 
-            if v['author'].strip() == up_name.strip()  # 完全匹配，包括大小写和空格
-        ]
-        
-        if not exact_matches:
-            # 如果没有完全匹配的结果，建议使用视频关注
-            similar_up = results[0]['author']
-            await bot.send(ev, 
-                f"⚠️ 未找到名称完全匹配的UP主\n"
-                f"您搜索的是: 【{up_name}】\n"
-                f"最接近的是: 【{similar_up}】\n"
-                "如需关注，请使用视频关注功能:\n"
-                "1. 在B站找到该UP主的任意视频\n"
-                "2. 使用命令: 视频关注 [视频链接]\n"
-                "例如: 视频关注 https://www.bilibili.com/video/BV1xxx"
-            )
-            return
-
-        # 只显示完全匹配的结果
-        up_info = exact_matches[0]
-        reply = [
-            f"👤 {up_info['author']} (UID:{up_info['mid']}) 的最新视频:",
-            "━━━━━━━━━━━━━━━━━━"
-        ]
-        
-        for i, video in enumerate(exact_matches[:MAX_RESULTS], 1):
-            pub_time = time.strftime("%Y-%m-%d", time.localtime(video['pubdate']))
-            pic_url = video['pic'] if video['pic'].startswith(('http://', 'https://')) else 'https:' + video['pic']
-            proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.replace("https://", "").replace("http://", ""), safe="")}'
-            
-            reply.extend([
-                f"{i}. {re.sub(r'<[^>]+>', '', video['title'])}",
-                f"[CQ:image,file={proxied_url}]",
-                f"   📅 {pub_time} | 👀 {video.get('play', 0)}播放",
-                f"   🔗 https://b23.tv/{video['bvid']}",
-                "━━━━━━━━━━━━━━━━━━"
-            ])
-        
-        await safe_send(bot, ev, "\n".join(reply))
-
-    except Exception as e:
-        await bot.send(ev, f'搜索失败: {str(e)}')
-
 
 @sv.scheduled_job('interval', minutes=3)
 async def clear_cache():
