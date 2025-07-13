@@ -149,6 +149,13 @@ async def get_bilibili_search(keyword: str, search_type: str = "video"):
                 if data.get('code') == 0:
                     results = data['data'].get('result', [])[:MAX_RESULTS]
                     if search_type == "up":
+                        # 确保结果中包含mid(UID)字段
+                        for r in results:
+                            if 'mid' not in r:
+                                r['mid'] = r.get('up_id', '')  # 使用备用字段
+                        # 如果是UID搜索，直接返回结果
+                        if keyword.isdigit():
+                            return results
                         # 按UP主名称精确匹配
                         results = [v for v in results if v['author'].lower() == keyword.lower()]
                         # 如果没有精确匹配结果，返回第一个结果（可能是UP主改名前的内容）
@@ -244,10 +251,10 @@ async def list_watched_ups(bot, ev: CQEvent):
         await bot.send(ev, '当前没有监控任何UP主')
         return
     
-    up_list = ["📢📢 当前监控的UP主列表:", "━━━━━━━━━━━━━━━━━━"]
+    up_list = ["📢📢📢📢 当前监控的UP主列表:", "━━━━━━━━━━━━━━━━━━"]
     for up_uid, info in watches.items():
         last_check = datetime.fromisoformat(info['last_check']).strftime('%m-%d %H:%M')
-        up_list.append(f"👤👤 {info['up_name']} (UID:{up_uid}) | 最后检查: {last_check}")
+        up_list.append(f"👤👤👤👤 {info['up_name']} (UID:{up_uid}) | 最后检查: {last_check}")
         up_list.append("━━━━━━━━━━━━━━━━━━")
     
     await bot.send(ev, "\n".join(up_list))
@@ -260,14 +267,14 @@ async def search_bilibili_video(bot, ev: CQEvent):
         return
     
     try:
-        msg_id = (await bot.send(ev, "🔍🔍 搜索中..."))['message_id']
+        msg_id = (await bot.send(ev, "🔍🔍🔍🔍 搜索中..."))['message_id']
         results = await get_bilibili_search(keyword, "video")
         
         if not results:
             await bot.finish(ev, f'未找到"{keyword}"相关视频')
             return
 
-        reply = ["📺📺 搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
+        reply = ["📺📺📺📺 搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
         for i, video in enumerate(results, 1):
             clean_title = re.sub(r'<[^>]+>', '', video['title'])
             pub_time = time.strftime("%Y-%m-%d", time.localtime(video['pubdate']))
@@ -281,8 +288,8 @@ async def search_bilibili_video(bot, ev: CQEvent):
             reply.extend([
                 f"{i}. {clean_title}",
                 f"[CQ:image,file={proxied_url}]",  # 图片放在标题下方
-                f"   📅📅 {pub_time} | 👤👤 {video['author']}",
-                f"   🔗🔗 https://b23.tv/{video['bvid']}",
+                f"   📅📅📅📅 {pub_time} | 👤👤👤👤 {video['author']}",
+                f"   🔗🔗🔗🔗 https://b23.tv/{video['bvid']}",
                 "━━━━━━━━━━━━━━━━━━"
             ])
         
@@ -298,14 +305,14 @@ async def search_bilibili_up(bot, ev: CQEvent):
         return
 
     try:
-        msg_id = (await bot.send(ev, f"🔍🔍 正在搜索【{up_name}】的最新视频..."))['message_id']
+        msg_id = (await bot.send(ev, f"🔍🔍🔍🔍 正在搜索【{up_name}】的最新视频..."))['message_id']
         
         results = await get_bilibili_search(up_name, "up")
         if not results:
             await bot.finish(ev, f'未找到UP主【{up_name}】的视频')
             return
 
-        reply = [f"👤👤 {results[0]['author']} (UID:{results[0]['mid']}) 的搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
+        reply = [f"👤👤👤👤 {results[0]['author']} (UID:{results[0]['mid']}) 的搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
         for i, video in enumerate(results, 1):
             pub_time = time.strftime("%Y-%m-%d", time.localtime(video['pubdate']))
             
@@ -318,8 +325,8 @@ async def search_bilibili_up(bot, ev: CQEvent):
             reply.extend([
                 f"{i}. {re.sub(r'<[^>]+>', '', video['title'])}",
                 f"[CQ:image,file={proxied_url}]",  # 图片放在标题下方
-                f"   📅📅 {pub_time} | 👀👀 {video.get('play', 0)}播放",
-                f"   🔗🔗 https://b23.tv/{video['bvid']}",
+                f"   📅📅📅📅 {pub_time} | 👀👀👀👀 {video.get('play', 0)}播放",
+                f"   🔗🔗🔗🔗 https://b23.tv/{video['bvid']}",
                 "━━━━━━━━━━━━━━━━━━"
             ])
         await safe_send(bot, ev, "\n".join(reply))
@@ -340,14 +347,27 @@ async def check_up_updates():
         for up_uid, info in up_dict.items():
             try:
                 current_up_name = info['up_name']
-                results = await get_bilibili_search(current_up_name, "up")
+                # 优先使用UID搜索UP主最新视频
+                results = await get_bilibili_search(up_uid, "up")
                 if not results:
+                    # 如果使用UID搜索不到，再尝试用名称搜索
+                    results = await get_bilibili_search(current_up_name, "up")
+                    if not results:
+                        continue
+                
+                # 确保找到的视频确实是该UP主的（UID匹配）
+                latest_video = None
+                for video in results:
+                    if str(video.get('mid')) == up_uid:
+                        latest_video = video
+                        break
+                
+                if not latest_video:
                     continue
                 
-                latest_video = results[0]
                 current_time = datetime.now()
                 
-                # 检查UP主是否改名
+                # 检查UP主是否改名（只有在UID匹配的情况下才比较名称）
                 new_name = latest_video['author']
                 name_changed = new_name.lower() != current_up_name.lower()
                 
@@ -361,7 +381,7 @@ async def check_up_updates():
                     proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.replace("https://", "").replace("http://", ""), safe="")}'
                     
                     msg = [
-                        f"📢📢 UP主【{new_name if name_changed else current_up_name}】(UID:{up_uid})发布了新视频！",
+                        f"📢📢📢📢 UP主【{new_name if name_changed else current_up_name}】(UID:{up_uid})发布了新视频！",
                         f"标题: {latest_video['title']}",
                         f"[CQ:image,file={proxied_url}]",  # 图片放在标题下方
                         f"发布时间: {pub_time}",
