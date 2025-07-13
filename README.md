@@ -18,6 +18,8 @@ B站视频搜索
 第一重：BV号直接对比，相同则绝对不推送
 第二重：不同BV号时，再比较发布时间，确保新视频确实发布时间更晚
 
+<img width="440" height="812" alt="image" src="https://github.com/user-attachments/assets/e5978966-9ed3-4ade-97e3-fa47861aa012" />
+
 <img width="400" height="818" alt="image" src="https://github.com/user-attachments/assets/0c280011-b16a-41fb-ab0b-8eeb9cf401d5" />
 
 <img width="450" height="756" alt="image" src="https://github.com/user-attachments/assets/017b8379-9530-45d0-8d32-d9fafbc0eae3" />
