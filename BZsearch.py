@@ -350,25 +350,14 @@ async def check_up_updates():
                 last_check_time = datetime.fromisoformat(info['last_check'])
                 sv.logger.info(f"检查UP主【{up_name}】更新，上次记录视频: {last_vid or '无'}")
 
-                # 通过查视频功能获取UP主视频
-                results = await get_bilibili_search(up_name, "video")
+                # 使用与"查视频 up名-up"完全相同的搜索逻辑
+                results = await get_bilibili_search(up_name, "up")
                 if not results:
-                    sv.logger.warning(f"未找到【{up_name}】的视频")
-                    continue
-                
-                # 筛选出完全匹配UP主名称的视频
-                matched_videos = []
-                for video in results:
-                    # 严格名称匹配
-                    if normalize_name(video['author']) == normalize_name(up_name):
-                        matched_videos.append(video)
-                
-                if not matched_videos:
-                    sv.logger.info(f"未找到完全匹配【{up_name}】的视频")
+                    sv.logger.warning(f"未找到UP主【{up_name}】的视频")
                     continue
                 
                 # 获取最新视频
-                latest_video = max(matched_videos, key=lambda x: x['pubdate'])
+                latest_video = results[0]  # 结果已按发布时间排序
                 current_bvid = latest_video['bvid']
                 video_pub_time = datetime.fromtimestamp(latest_video['pubdate'])
                 
@@ -413,7 +402,7 @@ async def check_up_updates():
                     pic_url = latest_video['pic']
                     if not pic_url.startswith(('http://', 'https://')):
                         pic_url = 'https:' + pic_url
-                    proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.replace("https://", "").replace("http://", ""), safe="")}'
+                    proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.split("//")[-1])}'
                     
                     msg = [
                         f"📢 UP主【{up_name}】发布了新视频！",
@@ -434,7 +423,7 @@ async def check_up_updates():
     sv.logger.info(f"监控检查完成，共检查 {sum(len(v) for v in all_watches.values())} 个UP主，发现 {update_count} 个更新")
 
 async def get_bilibili_search(keyword: str, search_type: str = "video") -> list:
-    """搜索B站视频"""
+    """搜索B站视频（精确版）"""
     cache_key = f"{search_type}:{normalize_name(keyword)}"
     if cache_key in search_cache:
         cached_data, timestamp = search_cache[cache_key]
@@ -444,14 +433,16 @@ async def get_bilibili_search(keyword: str, search_type: str = "video") -> list:
     params = {
         'search_type': 'video',
         'keyword': keyword,
-        'order': 'pubdate',
-        'ps': MAX_RESULTS,
+        'order': 'pubdate',  # 按发布时间排序
+        'duration': 0,       # 不限时长
+        'tids': 0,          # 不限分区
+        'ps': MAX_RESULTS * 2,  # 获取双倍结果用于筛选
         'platform': 'web'
     }
+
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
         'Referer': 'https://www.bilibili.com/',
-        'Origin': 'https://www.bilibili.com',
         'Cookie': 'buvid3=XXXXXX;'
     }
 
@@ -468,38 +459,76 @@ async def get_bilibili_search(keyword: str, search_type: str = "video") -> list:
                     return []
                 data = await resp.json()
                 if data.get('code') == 0:
-                    results = data['data'].get('result', [])[:MAX_RESULTS]
+                    raw_results = data['data'].get('result', [])
+                    # 精确筛选前N个结果
+                    results = []
+                    for video in raw_results:
+                        if len(results) >= MAX_RESULTS:
+                            break
+                        # 如果是UP主搜索，确保作者匹配
+                        if search_type == "up" and normalize_name(video.get('author', '')) != normalize_name(keyword):
+                            continue
+                        results.append(video)
+                    
                     search_cache[cache_key] = (results, datetime.now())
                     return results
         except Exception as e:
             sv.logger.error(f"搜索失败: {str(e)}")
         return []
-        
+
 @sv.on_prefix('查视频')
 async def search_bilibili_video(bot, ev: CQEvent):
-    keyword = ev.message.extract_plain_text().strip()
-    if not keyword:
-        await bot.send(ev, '请输入搜索关键词，例如：查视频 原神')
+    raw_input = ev.message.extract_plain_text().strip()
+    if not raw_input:
+        await bot.send(ev, '请输入搜索指令，例如：\n1. 查视频 原神\n2. 查视频 老番茄-up')
         return
+    
+    # 解析-up参数
+    keyword = None  # 初始化keyword变量
+    up_name = None
+    
+    if '-up' in raw_input:
+        parts = re.split(r'\s*-up\s*', raw_input, 1)
+        if len(parts) > 0:
+            keyword = parts[0].strip() if parts[0].strip() else None
+        if len(parts) > 1:
+            up_name = parts[1].strip()
+        
+        # 处理"老番茄-up"情况
+        if not up_name and keyword:
+            up_name = keyword
+            keyword = None
+    else:
+        keyword = raw_input
     
     try:
         msg_id = (await bot.send(ev, "🔍 搜索中..."))['message_id']
-        results = await get_bilibili_search(keyword, "video")
         
-        if not results:
-            await bot.finish(ev, f'未找到"{keyword}"相关视频')
-            return
-
+        # 获取搜索结果
+        if up_name:
+            # 使用精确UP主搜索模式
+            results = await get_bilibili_search(up_name, "up")
+            if not results:
+                await bot.finish(ev, f'未找到UP主【{up_name}】的视频')
+                return
+        else:
+            # 普通关键词搜索
+            search_term = keyword if keyword is not None else raw_input
+            results = await get_bilibili_search(search_term)
+            if not results:
+                await bot.finish(ev, f'未找到"{search_term}"相关视频')
+                return
+        
+        # 构建回复
         reply = ["📺 搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
-        for i, video in enumerate(results, 1):
+        for i, video in enumerate(results[:MAX_RESULTS], 1):
             clean_title = re.sub(r'<[^>]+>', '', video['title'])
-            pub_time = time.strftime("%Y-%m-%d", time.localtime(video['pubdate']))
+            pub_time = time.strftime("%Y-%m-%d %H:%M", time.localtime(video['pubdate']))
             
-            # 处理图片URL
             pic_url = video['pic']
             if not pic_url.startswith(('http://', 'https://')):
                 pic_url = 'https:' + pic_url
-            proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.replace("https://", "").replace("http://", ""), safe="")}'
+            proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.split("//")[-1])}'
             
             reply.extend([
                 f"{i}. {clean_title}",
@@ -510,5 +539,6 @@ async def search_bilibili_video(bot, ev: CQEvent):
             ])
         
         await safe_send(bot, ev, "\n".join(reply))
+        
     except Exception as e:
         await bot.send(ev, f'搜索失败: {str(e)}')
