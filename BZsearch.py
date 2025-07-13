@@ -559,35 +559,57 @@ async def search_bilibili_up(bot, ev: CQEvent):
         return
 
     try:
-        msg_id = (await bot.send(ev, f"🔍🔍 正在搜索【{up_name}】的最新视频..."))['message_id']
+        msg_id = (await bot.send(ev, f"正在搜索【{up_name}】的最新视频..."))['message_id']
         
         results = await get_bilibili_search(up_name, "up")
         if not results:
             await bot.finish(ev, f'未找到UP主【{up_name}】的视频')
             return
 
-        reply = [f"👤👤 {results[0]['author']} (UID:{results[0]['mid']}) 的搜索结果（最多5个）：", "━━━━━━━━━━━━━━━━━━"]
-        for i, video in enumerate(results, 1):
+        # 严格名称匹配检查
+        exact_matches = [
+            v for v in results 
+            if v['author'].strip() == up_name.strip()  # 完全匹配，包括大小写和空格
+        ]
+        
+        if not exact_matches:
+            # 如果没有完全匹配的结果，建议使用视频关注
+            similar_up = results[0]['author']
+            await bot.send(ev, 
+                f"⚠️ 未找到名称完全匹配的UP主\n"
+                f"您搜索的是: 【{up_name}】\n"
+                f"最接近的是: 【{similar_up}】\n"
+                "如需关注，请使用视频关注功能:\n"
+                "1. 在B站找到该UP主的任意视频\n"
+                "2. 使用命令: 视频关注 [视频链接]\n"
+                "例如: 视频关注 https://www.bilibili.com/video/BV1xxx"
+            )
+            return
+
+        # 只显示完全匹配的结果
+        up_info = exact_matches[0]
+        reply = [
+            f"👤 {up_info['author']} (UID:{up_info['mid']}) 的最新视频:",
+            "━━━━━━━━━━━━━━━━━━"
+        ]
+        
+        for i, video in enumerate(exact_matches[:MAX_RESULTS], 1):
             pub_time = time.strftime("%Y-%m-%d", time.localtime(video['pubdate']))
-            
-            # 处理图片URL
-            pic_url = video['pic']
-            if not pic_url.startswith(('http://', 'https://')):
-                pic_url = 'https:' + pic_url
+            pic_url = video['pic'] if video['pic'].startswith(('http://', 'https://')) else 'https:' + video['pic']
             proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.replace("https://", "").replace("http://", ""), safe="")}'
             
             reply.extend([
                 f"{i}. {re.sub(r'<[^>]+>', '', video['title'])}",
-                f"[CQ:image,file={proxied_url}]",  # 图片放在标题下方
-                f"   📅📅 {pub_time} | 👀👀 {video.get('play', 0)}播放",
-                f"   🔗🔗 https://b23.tv/{video['bvid']}",
+                f"[CQ:image,file={proxied_url}]",
+                f"   📅 {pub_time} | 👀 {video.get('play', 0)}播放",
+                f"   🔗 https://b23.tv/{video['bvid']}",
                 "━━━━━━━━━━━━━━━━━━"
             ])
+        
         await safe_send(bot, ev, "\n".join(reply))
 
     except Exception as e:
         await bot.send(ev, f'搜索失败: {str(e)}')
-
 
 
 @sv.scheduled_job('interval', minutes=3)
