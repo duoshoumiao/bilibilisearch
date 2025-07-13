@@ -240,18 +240,31 @@ async def watch_by_video(bot, ev: CQEvent):
     """通过视频链接关注UP主"""
     video_url = ev.message.extract_plain_text().strip()
     if not video_url:
-        await bot.send(ev, '请输入视频链接，例如：视频关注 https://www.bilibili.com/video/BV1xxx')
+        await bot.send(ev, '请输入视频链接，例如：视频关注 https://www.bilibili.com/video/BV1B73kzcE1e')
         return
     
-    # 提取BV号
+    # 增强版BV号提取逻辑
     bvid = None
-    if 'bilibili.com/video/' in video_url:
-        match = re.search(r'bilibili\.com/video/(BV[0-9A-Za-z]+)', video_url)
+    patterns = [
+        r'bilibili\.com/video/(BV[0-9A-Za-z]+)',  # 标准链接
+        r'b23\.tv/(BV[0-9A-Za-z]+)',             # 短链接
+        r'(BV[0-9A-Za-z]+)',                      # 纯BV号
+        r'bilibili\.com/video/av\d+\?.*bv=(BV[0-9A-Za-z]+)',  # 旧版av号链接带bv参数
+        r'video/(BV[0-9A-Za-z]+)/?'              # 简化链接
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, video_url)
         if match:
             bvid = match.group(1)
+            break
     
     if not bvid:
-        await bot.send(ev, '无法从链接中识别视频BV号，请确认链接格式正确')
+        await bot.send(ev, '无法从链接中识别视频BV号，请确认链接格式正确\n'
+                          '支持的格式示例:\n'
+                          '1. https://www.bilibili.com/video/BV1B73kzcE1e\n'
+                          '2. https://b23.tv/BV1B73kzcE1e\n'
+                          '3. BV1B73kzcE1e')
         return
     
     group_id = ev.group_id
