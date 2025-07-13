@@ -8,7 +8,7 @@ B站视频搜索
 4. 取关up [UP主名称] - 取消监控
 5. 视频关注 视频链接  -自动关注up （避免好久没更新的up可能搜不到）
 6. 查看关注 - 查看当前监控列表
-
+关注部分正在改进中
 更新 关注up 封面显示
 
 <img width="400" height="818" alt="image" src="https://github.com/user-attachments/assets/0c280011-b16a-41fb-ab0b-8eeb9cf401d5" />
