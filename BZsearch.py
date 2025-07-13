@@ -14,7 +14,7 @@ from hoshino.typing import CQEvent
 import aiohttp
 
 # 主服务定义
-sv = Service('b站视频搜索', enable_on_default=True, help_='搜索B站视频\n使用方法：\n1. 查视频 [关键词] - 搜索B站视频\n2. 查up [UP主名称] - 搜索UP主视频\n3. 关注up [UP主名称] - 监控UP主新视频\n4. 通过视频关注 [视频链接] - 通过视频链接关注UP主\n5. 取关up [UP主名称/UID] - 取消监控\n6. 查看关注 - 查看当前监控列表')
+sv = Service('b站视频搜索', enable_on_default=True, help_='搜索B站视频\n使用方法：\n1. 查视频 [关键词] - 搜索B站视频\n2. 查up [UP主名称] - 搜索UP主视频\n3. 关注up [UP主名称] - 监控UP主新视频\n4. 视频关注 [视频链接] - 通过视频链接关注UP主\n5. 取关up [UP主名称/UID] - 取消监控\n6. 查看关注 - 查看当前监控列表')
 
 # 配置项
 MAX_RESULTS = 5
@@ -282,7 +282,7 @@ async def watch_bilibili_up(bot, ev: CQEvent):
     except Exception as e:
         await bot.send(ev, f'关注失败: {str(e)}')
 
-@sv.on_prefix('通过视频关注')
+@sv.on_prefix('视频关注')
 async def watch_by_video(bot, ev: CQEvent):
     """通过视频链接关注UP主"""
     video_url = ev.message.extract_plain_text().strip()
