@@ -21,3 +21,5 @@ B站视频搜索
 <img width="400" height="818" alt="image" src="https://github.com/user-attachments/assets/0c280011-b16a-41fb-ab0b-8eeb9cf401d5" />
 
 <img width="450" height="756" alt="image" src="https://github.com/user-attachments/assets/017b8379-9530-45d0-8d32-d9fafbc0eae3" />
+
+<img width="448" height="791" alt="image" src="https://github.com/user-attachments/assets/7f2e7203-4288-4fa0-bf82-2b40153343ce" />
