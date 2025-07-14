@@ -17,7 +17,7 @@ sv = Service('b站视频搜索', enable_on_default=True, help_='搜索B站视频
 
 # 配置项
 MAX_RESULTS = 5
-UP_WATCH_INTERVAL = 1  # 监控间隔(分钟)
+UP_WATCH_INTERVAL = 10  # 监控间隔(分钟)
 CACHE_EXPIRE_MINUTES = 3
 search_cache = {}
 
@@ -376,7 +376,7 @@ async def list_watched_ups(bot, ev: CQEvent):
 
 @sv.scheduled_job('interval', minutes=UP_WATCH_INTERVAL)
 async def check_up_updates():
-    """定时检查UP主更新（使用与查视频相同的搜索逻辑）"""
+    """定时检查UP主更新（优化第二道工序选择最新视频）"""
     sv.logger.info("开始执行UP主监控检查...")
     all_watches = watch_storage.get_all_watches()
     if not all_watches:
@@ -391,7 +391,7 @@ async def check_up_updates():
         for up_name, info in up_dict.items():
             try:
                 # 添加延迟防止请求过于频繁
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
                 
                 last_vid = info.get('last_vid')
                 sv.logger.info(f"开始检查UP主【{up_name}】更新，上次记录视频: {last_vid or '无'}")
@@ -434,7 +434,7 @@ async def check_up_updates():
                     except Exception as e:
                         sv.logger.warning(f"空间API查询失败({up_name}): {str(e)}")
                 
-                # 第二步：如果空间API失败或返回"无新发布"，使用与"查视频"相同的搜索API（名字-up）
+                # 第二步：如果空间API失败或返回"无新发布"，使用搜索API（名字-up）
                 if not latest_video or (latest_video and latest_video['bvid'] == last_vid):
                     check_method = "搜索API(名字-up)"
                     try:
@@ -452,10 +452,10 @@ async def check_up_updates():
                         if not matched_videos:
                             raise Exception("搜索结果中没有匹配UP主的视频")
                         
-                        # 按发布时间排序
+                        # 按发布时间排序（确保选择最新视频）
                         matched_videos.sort(key=lambda x: x['pubdate'], reverse=True)
                         latest_video = matched_videos[0]
-                        sv.logger.info(f"搜索API(名字-up)获取成功: {latest_video['title']}")
+                        sv.logger.info(f"搜索API(名字-up)获取最新视频: {latest_video['title']} (发布时间: {datetime.fromtimestamp(latest_video['pubdate'])})")
                         
                         # 如果BV号相同，说明可能不是最新视频，触发第三道检查
                         if latest_video['bvid'] == last_vid:
@@ -484,7 +484,7 @@ async def check_up_updates():
                             # 按发布时间排序
                             matched_videos.sort(key=lambda x: x['pubdate'], reverse=True)
                             latest_video = matched_videos[0]
-                            sv.logger.info(f"直接搜索(查视频+UP名)获取成功: {latest_video['title']}")
+                            sv.logger.info(f"直接搜索(查视频+UP名)获取最新视频: {latest_video['title']} (发布时间: {datetime.fromtimestamp(latest_video['pubdate'])})")
                             
                         except Exception as e:
                             sv.logger.error(f"直接搜索(查视频+UP名)失败({up_name}): {str(e)}")
