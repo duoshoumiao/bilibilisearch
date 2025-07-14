@@ -27,64 +27,58 @@ os.makedirs(WATCH_JSON_PATH.parent, exist_ok=True)
 
 class UpWatchStorage:
     def __init__(self):
-        self._data = {}
-        self.name_index = {}  # 名称小写索引
+        self._data = {}  # 主数据结构
+        self.name_index = {}  # 名称小写索引: {up_name_lower: {group_id: up_name}}
         self._load_and_migrate()
         sv.logger.info("UP主监控存储初始化完成")
     
     def _load_and_migrate(self):
-        """加载并自动迁移旧格式数据"""
+        """加载并自动迁移旧格式数据，确保保留多群组关注关系"""
         try:
             if WATCH_JSON_PATH.exists():
                 with open(WATCH_JSON_PATH, 'r', encoding='utf-8') as f:
                     old_data = json.load(f)
                     sv.logger.info(f"从文件加载监控数据，共 {sum(len(v) for v in old_data.values())} 条记录")
+                
+                    # 无论新旧格式，都统一转换为新格式
+                    self._data = {}
+                    self.name_index = {}
+                
+                    for group_id_str, ups in old_data.items():
+                        # 确保群组ID是字符串
+                        group_id = str(group_id_str)
+                        self._data[group_id] = {}
                     
-                    # 检查是否为旧格式(包含数字UID键)
-                    is_old_format = any(
-                        any(k.isdigit() for k in ups.keys())
-                        for ups in old_data.values()
-                    )
-                    
-                    if is_old_format:
-                        sv.logger.info("检测到旧格式数据，开始自动迁移...")
-                        self._migrate_from_old_format(old_data)
-                    else:
-                        self._data = old_data
-                        # 重建名称索引
-                        for group_id, ups in old_data.items():
-                            for up_name in ups.keys():
-                                self.name_index[up_name.lower()] = (group_id, up_name)
-                        sv.logger.info("数据加载完成，无需迁移")
-                        
+                        for up_key, info in ups.items():
+                            try:
+                                # 处理旧格式(键是数字UID的情况)
+                                if up_key.isdigit():
+                                    up_name = info.get('up_name', f"未知UP主_{up_key[-4:]}")
+                                else:
+                                    up_name = up_key
+                            
+                                # 标准化存储
+                                self._data[group_id][up_name] = {
+                                    'last_check': info.get('last_check', datetime.now().isoformat()),
+                                    'last_vid': info.get('last_vid')
+                                }
+                            
+                                # 更新名称索引
+                                up_name_lower = normalize_name(up_name)
+                                if up_name_lower not in self.name_index:
+                                    self.name_index[up_name_lower] = {}
+                                self.name_index[up_name_lower][group_id] = up_name
+                            
+                            except Exception as e:
+                                sv.logger.error(f"迁移UP主记录失败: group={group_id}, up={up_key}, error={str(e)}")
+                
+                    sv.logger.info(f"数据迁移完成，共处理 {len(self._data)} 个群组的监控数据")
+                    self.save()  # 立即保存新格式
+                
         except Exception as e:
             sv.logger.error(f"加载监控数据失败: {str(e)}")
             self._data = {}
-    
-    def _migrate_from_old_format(self, old_data):
-        """从旧格式迁移数据"""
-        migrated_count = 0
-        for group_id, ups in old_data.items():
-            self._data[group_id] = {}
-            for uid, info in ups.items():
-                try:
-                    up_name = info['up_name']
-                    # 确保名称唯一性
-                    if up_name.lower() in self.name_index:
-                        sv.logger.warning(f"发现重复UP主名称: {up_name}，添加随机后缀")
-                        up_name = f"{up_name}_{uid[-4:]}"
-                    
-                    self._data[group_id][up_name] = {
-                        'last_check': info['last_check'],
-                        'last_vid': info['last_vid']
-                    }
-                    self.name_index[up_name.lower()] = (group_id, up_name)
-                    migrated_count += 1
-                except Exception as e:
-                    sv.logger.error(f"迁移UP主 {uid} 失败: {str(e)}")
-        
-        sv.logger.info(f"数据迁移完成，共迁移 {migrated_count} 条记录")
-        self.save()  # 立即保存新格式
+            self.name_index = {}
     
     def save(self):
         try:
@@ -104,21 +98,38 @@ class UpWatchStorage:
             'last_check': datetime.now().isoformat(),
             'last_vid': last_vid
         }
-        self.name_index[up_name.lower()] = (group_id, up_name)
+        
+        # 更新名称索引
+        up_name_lower = normalize_name(up_name)
+        if up_name_lower not in self.name_index:
+            self.name_index[up_name_lower] = {}
+        self.name_index[up_name_lower][group_id] = up_name
+        
         self.save()
         sv.logger.info(f"已添加监控: 群{group_id} -> UP主{up_name}")
     
     def remove_watch(self, group_id: int, up_name: str) -> bool:
         group_id = str(group_id)
-        if group_id in self._data and up_name in self._data[group_id]:
+        up_name_lower = normalize_name(up_name)
+        
+        # 检查是否存在
+        if (group_id in self._data and up_name in self._data[group_id] and 
+            up_name_lower in self.name_index and group_id in self.name_index[up_name_lower]):
+            
+            # 删除主数据
             del self._data[group_id][up_name]
-            if up_name.lower() in self.name_index:
-                del self.name_index[up_name.lower()]
             if not self._data[group_id]:
                 del self._data[group_id]
+            
+            # 删除索引
+            del self.name_index[up_name_lower][group_id]
+            if not self.name_index[up_name_lower]:
+                del self.name_index[up_name_lower]
+            
             self.save()
             sv.logger.info(f"已移除监控: 群{group_id} -> UP主{up_name}")
             return True
+        
         sv.logger.warning(f"移除监控失败: 群{group_id} 未监控 UP主{up_name}")
         return False
     
@@ -139,9 +150,9 @@ class UpWatchStorage:
             self.save()
             sv.logger.info(f"更新视频记录: 群{group_id} -> UP主{up_name} -> BV{last_vid}")
     
-    def find_up_by_name(self, name: str) -> Optional[Tuple[str, str]]:
-        """通过名称查找(不区分大小写)"""
-        return self.name_index.get(normalize_name(name))
+    def find_up_by_name(self, name: str) -> Dict[str, str]:
+        """通过名称查找(不区分大小写)，返回{group_id: up_name}字典"""
+        return self.name_index.get(normalize_name(name), {})
 
 # 全局存储实例
 watch_storage = UpWatchStorage()
@@ -237,7 +248,7 @@ async def safe_send(bot, ev, message):
 
 @sv.on_prefix('视频关注')
 async def watch_by_video(bot, ev: CQEvent):
-    """通过视频链接关注UP主"""
+    """通过视频链接关注UP主（群独立关注版）"""
     video_url = ev.message.extract_plain_text().strip()
     if not video_url:
         await bot.send(ev, '请输入视频链接，例如：视频关注 https://www.bilibili.com/video/BV1B73kzcE1e')
@@ -260,11 +271,11 @@ async def watch_by_video(bot, ev: CQEvent):
             break
     
     if not bvid:
-        await bot.send(ev, '无法从链接中识别视频BV号，请确认链接格式正确\n'
-                          '支持的格式示例:\n'
-                          '1. https://www.bilibili.com/video/BV1B73kzcE1e\n'
-                          '2. https://b23.tv/BV1B73kzcE1e\n'
-                          '3. BV1B73kzcE1e')
+        await bot.send(ev, '⚠️ 无法识别视频BV号，请确认链接格式正确\n'
+                         '📌 支持格式示例:\n'
+                         '1. https://www.bilibili.com/video/BV1B73kzcE1e\n'
+                         '2. https://b23.tv/BV1B73kzcE1e\n'
+                         '3. BV1B73kzcE1e')
         return
     
     group_id = ev.group_id
@@ -273,29 +284,49 @@ async def watch_by_video(bot, ev: CQEvent):
         # 获取视频信息
         video_info = await get_video_info(bvid)
         if not video_info:
-            await bot.send(ev, '获取视频信息失败，请稍后再试')
+            await bot.send(ev, '❌ 获取视频信息失败，请检查BV号是否正确或稍后再试')
             return
         
         up_name = video_info['owner']['name']
         
-        # 检查是否已关注
-        if watch_storage.find_up_by_name(up_name):
-            await bot.send(ev, f'【{up_name}】已在监控列表中')
+        # 仅检查本群是否已关注（不检查其他群）
+        group_watches = watch_storage.get_group_watches(group_id)
+        if up_name in group_watches:
+            last_check = datetime.fromisoformat(group_watches[up_name]['last_check']).strftime('%m-%d %H:%M')
+            await bot.send(ev, f'ℹ️ 本群已关注【{up_name}】\n'
+                             f'⏰ 最后检查时间: {last_check}')
             return
         
-        # 添加到监控
+        # 添加到本群监控
         watch_storage.add_watch(
             group_id=group_id,
             up_name=up_name,
             last_vid=bvid
         )
         
-        await bot.send(ev, f'✅ 已通过视频关注UP主【{up_name}】\n'
-                         f'视频标题: {video_info["title"]}\n'
-                         '将监控后续更新')
+        # 构建响应消息
+        pub_time = datetime.fromtimestamp(video_info['pubdate']).strftime('%Y-%m-%d %H:%M')
+        pic_url = 'https:' + video_info['pic'] if not video_info['pic'].startswith(('http://', 'https://')) else video_info['pic']
+        proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.split("//")[-1])}'
         
+        msg = [
+            f'✅ 成功关注UP主【{up_name}】',
+            f'📺 视频标题: {video_info["title"]}',
+            f'[CQ:image,file={proxied_url}]',
+            f'⏰ 发布时间: {pub_time}',
+            f'🔗 视频链接: https://b23.tv/{bvid}',
+            '📢 该UP主的新视频将会通知本群'
+        ]
+        
+        await bot.send(ev, '\n'.join(msg))
+        
+    except aiohttp.ClientError as e:
+        await bot.send(ev, f'🌐 网络请求失败: {str(e)}\n请稍后再试')
+    except json.JSONDecodeError:
+        await bot.send(ev, '❌ 数据解析失败，可能是B站API变更\n请通知维护人员检查')
     except Exception as e:
-        await bot.send(ev, f'通过视频关注失败: {str(e)}')
+        sv.logger.error(f'视频关注功能异常: {type(e).__name__}: {str(e)}')
+        await bot.send(ev, f'⚠️ 发生未知错误: {str(e)}\n请检查日志获取详细信息')
 
 @sv.on_prefix('取关up')
 async def unwatch_bilibili_up(bot, ev: CQEvent):
