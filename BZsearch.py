@@ -13,11 +13,11 @@ from hoshino.typing import CQEvent
 import aiohttp
 
 # 主服务定义
-sv = Service('b站视频搜索', enable_on_default=True, help_='搜索B站视频\n使用方法：\n1. 查视频 [关键词] - 搜索B站视频\n2. 视频关注 [视频链接] - 通过视频链接关注UP主\n3. 取关up [UP主名称] - 取消监控\n4. 查看关注 - 查看当前监控列表')
+sv = Service('b站视频搜索', enable_on_default=True, help_='搜索B站视频\n使用方法：\n1. 查视频 [关键词/名称-up] - 搜索B站视频\n2. 视频关注/关注+ [视频链接] - 通过视频链接关注UP主\n3. 取关up [UP主名称] - 取消监控\n4. 查看关注 - 查看当前监控列表')
 
 # 配置项
 MAX_RESULTS = 5
-UP_WATCH_INTERVAL = 1  # 监控间隔(分钟)
+UP_WATCH_INTERVAL = 5  # 监控间隔(分钟)
 CACHE_EXPIRE_MINUTES = 3
 search_cache = {}
 
@@ -246,7 +246,7 @@ async def safe_send(bot, ev, message):
     except Exception as e:
         sv.logger.error(f'发送消息失败: {str(e)}')
 
-@sv.on_prefix('视频关注')
+@sv.on_prefix(('视频关注','关注'))
 async def watch_by_video(bot, ev: CQEvent):
     """通过视频链接关注UP主（群独立关注版）"""
     video_url = ev.message.extract_plain_text().strip()
@@ -377,82 +377,109 @@ async def check_up_updates():
         group_id = int(group_id_str)
         for up_name, info in up_dict.items():
             try:
+                # 添加延迟
+                await asyncio.sleep(3)  # 每个UP主检查间隔3秒
+                
                 last_vid = info.get('last_vid')
                 last_check_time = datetime.fromisoformat(info['last_check'])
-                sv.logger.info(f"检查UP主【{up_name}】更新，上次记录视频: {last_vid or '无'}")
+                sv.logger.info(f"检查UP主【{up_name}】更新，上次记录视频: {last_vid or '无'}")                
 
-                # 使用与"查视频 up名-up"完全相同的搜索逻辑
-                results = await get_bilibili_search(up_name, "up")
-                if not results:
-                    sv.logger.warning(f"未找到UP主【{up_name}】的视频")
-                    continue
-                
-                # 获取最新视频
-                latest_video = results[0]  # 结果已按发布时间排序
-                current_bvid = latest_video['bvid']
-                video_pub_time = datetime.fromtimestamp(latest_video['pubdate'])
-                
-                # 验证是否为新视频
-                is_new = False
-                reason = ""
-                
-                if not last_vid:
-                    is_new = True
-                    reason = "首次监控该UP主"
-                else:
-                    # 1. 检查BV号是否相同
-                    if current_bvid == last_vid:
-                        reason = "BV号相同，视频未更新"
-                    else:
-                        # 2. 获取上次视频信息
-                        last_video_info = await get_video_info(last_vid)
-                        if not last_video_info:
-                            reason = "无法获取上次视频信息，保守处理不推送"
-                        else:
-                            last_pub_time = datetime.fromtimestamp(last_video_info['pubdate'])
-                            # 3. 比较发布时间（增加2分钟缓冲）
-                            if video_pub_time > (last_pub_time + timedelta(minutes=2)):
+                # 通过上次保存的BV号获取UP主mid
+                if last_vid:
+                    video_info = await get_video_info(last_vid)
+                    if not video_info:
+                        sv.logger.warning(f"无法获取上次视频信息: {last_vid}")
+                        continue
+                    
+                    up_mid = video_info['owner']['mid']
+                    
+                    # 获取UP主空间最新视频
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                        'Referer': f'https://space.bilibili.com/{up_mid}'
+                    }
+                    url = f'https://api.bilibili.com/x/space/arc/search?mid={up_mid}&ps=5&order=pubdate'
+                    
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(url, headers=headers, timeout=10) as resp:
+                            if resp.status != 200:
+                                sv.logger.error(f"获取UP主空间失败: HTTP {resp.status}")
+                                continue
+                            data = await resp.json()
+                            if data.get('code') != 0:
+                                sv.logger.error(f"UP主空间API返回错误: {data.get('message')}")
+                                continue
+                            
+                            vlist = data['data']['list']['vlist']
+                            if not vlist:
+                                sv.logger.info(f"UP主【{up_name}】空间没有视频")
+                                continue
+                            
+                            latest_video = vlist[0]
+                            current_bvid = latest_video['bvid']
+                            video_pub_time = datetime.fromtimestamp(latest_video['created'])
+                            
+                            # 验证是否为新视频
+                            is_new = False
+                            reason = ""
+                            
+                            if not last_vid:
                                 is_new = True
-                                reason = (f"新视频发布时间({video_pub_time}) > "
-                                         f"上次视频发布时间({last_pub_time})")
+                                reason = "首次监控该UP主"
                             else:
-                                reason = "无新发布(发布时间未超过阈值)"
-                
-                sv.logger.info(f"更新判断: {reason}")
-                
-                # 如果是新视频则更新记录并推送
-                if is_new:
-                    watch_storage.update_last_video(
-                        group_id=group_id,
-                        up_name=up_name,
-                        last_vid=current_bvid
-                    )
-                    
-                    # 准备通知内容
-                    pub_time = video_pub_time.strftime("%Y-%m-%d %H:%M")
-                    pic_url = latest_video['pic']
-                    if not pic_url.startswith(('http://', 'https://')):
-                        pic_url = 'https:' + pic_url
-                    proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.split("//")[-1])}'
-                    
-                    msg = [
-                        f"📢 UP主【{up_name}】发布了新视频！",
-                        f"📺 标题: {latest_video['title']}",
-                        f"[CQ:image,file={proxied_url}]",
-                        f"⏰ 发布时间: {pub_time}",
-                        f"🔗 视频链接: https://b23.tv/{current_bvid}"
-                    ]
-                    
-                    await bot.send_group_msg(group_id=group_id, message="\n".join(msg))
-                    update_count += 1
-                    sv.logger.info(f"已发送新视频通知: {up_name} - {latest_video['title']}")
+                                # 检查BV号是否相同
+                                if current_bvid == last_vid:
+                                    reason = "BV号相同，视频未更新"
+                                else:
+                                    # 获取上次视频信息
+                                    last_video_info = await get_video_info(last_vid)
+                                    if not last_video_info:
+                                        reason = "无法获取上次视频信息，保守处理不推送"
+                                    else:
+                                        last_pub_time = datetime.fromtimestamp(last_video_info['pubdate'])
+                                        # 比较发布时间（增加2分钟缓冲）
+                                        if video_pub_time > (last_pub_time + timedelta(minutes=2)):
+                                            is_new = True
+                                            reason = (f"新视频发布时间({video_pub_time}) > "
+                                                     f"上次视频发布时间({last_pub_time})")
+                                        else:
+                                            reason = "无新发布(发布时间未超过阈值)"
+                            
+                            sv.logger.info(f"更新判断: {reason}")
+                            
+                            # 如果是新视频则更新记录并推送
+                            if is_new:
+                                watch_storage.update_last_video(
+                                    group_id=group_id,
+                                    up_name=up_name,
+                                    last_vid=current_bvid
+                                )
+                                
+                                # 准备通知内容
+                                pub_time = video_pub_time.strftime("%Y-%m-%d %H:%M")
+                                pic_url = latest_video['pic']
+                                if not pic_url.startswith(('http://', 'https://')):
+                                    pic_url = 'https:' + pic_url
+                                proxied_url = f'https://images.weserv.nl/?url={quote(pic_url.split("//")[-1])}'
+                                
+                                msg = [
+                                    f"📢📢 UP主【{up_name}】发布了新视频！",
+                                    f"📺📺 标题: {latest_video['title']}",
+                                    f"[CQ:image,file={proxied_url}]",
+                                    f"⏰⏰⏰ 发布时间: {pub_time}",
+                                    f"🔗🔗 视频链接: https://b23.tv/{current_bvid}"
+                                ]
+                                
+                                await bot.send_group_msg(group_id=group_id, message="\n".join(msg))
+                                update_count += 1
+                                sv.logger.info(f"已发送新视频通知: {up_name} - {latest_video['title']}")
                 
             except Exception as e:
                 sv.logger.error(f'监控UP主【{up_name}】失败: {str(e)}')
                 continue
     
     sv.logger.info(f"监控检查完成，共检查 {sum(len(v) for v in all_watches.values())} 个UP主，发现 {update_count} 个更新")
-
+    
 async def get_bilibili_search(keyword: str, search_type: str = "video") -> list:
     """搜索B站视频（精确版）"""
     cache_key = f"{search_type}:{normalize_name(keyword)}"
