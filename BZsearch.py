@@ -17,7 +17,7 @@ sv = Service('b站视频搜索', enable_on_default=True, help_='搜索B站视频
 
 # 配置项
 MAX_RESULTS = 5
-UP_WATCH_INTERVAL = 10  # 监控间隔(分钟)
+UP_WATCH_INTERVAL = 1  # 监控间隔(分钟)
 CACHE_EXPIRE_MINUTES = 3
 search_cache = {}
 
@@ -270,6 +270,7 @@ async def watch_by_video(bot, ev: CQEvent):
         r'b23\.tv/(BV[0-9A-Za-z]+)',
         r'(BV[0-9A-Za-z]+)',
         r'bilibili\.com/video/av\d+\?.*bv=(BV[0-9A-Za-z]+)',
+        r'bilibili\.com/video/(av\d+)',
         r'video/(BV[0-9A-Za-z]+)/?'
     ]
     
@@ -376,7 +377,7 @@ async def list_watched_ups(bot, ev: CQEvent):
 
 @sv.scheduled_job('interval', minutes=UP_WATCH_INTERVAL)
 async def check_up_updates():
-    """定时检查UP主更新（使用与查视频相同的搜索逻辑）"""
+    """定时检查UP主更新（使用与查视频-up完全一致的搜索逻辑）"""
     sv.logger.info("开始执行UP主监控检查...")
     all_watches = watch_storage.get_all_watches()
     if not all_watches:
@@ -434,45 +435,74 @@ async def check_up_updates():
                     except Exception as e:
                         sv.logger.warning(f"空间API查询失败({up_name}): {str(e)}")
                 
-                # 第二步：如果空间API失败或返回"无新发布"，使用与"查视频"相同的搜索API（名字-up）
+                # 第二步：使用与"查视频 -up"完全相同的搜索逻辑
                 if not latest_video or (latest_video and latest_video['bvid'] == last_vid):
-                    check_method = "搜索API(名字-up)"
+                    check_method = "搜索API(查视频-up)"
                     try:
-                        # 使用与"查视频"相同的搜索逻辑
-                        results = await get_bilibili_search(f"{up_name} up主:{up_name}", "video")
-                        if not results:
-                            raise Exception("未找到UP主视频")
+                        # 完全复制自 @sv.on_prefix('查视频') 中的 -up 搜索逻辑
+                        # 直接使用UP主名称作为搜索词
+                        search_term = up_name
                         
-                        # 严格筛选UP主匹配的视频
-                        matched_videos = []
-                        for video in results:
-                            if normalize_name(video['author']) == normalize_name(up_name):
-                                matched_videos.append(video)
-                        
-                        if not matched_videos:
-                            raise Exception("搜索结果中没有匹配UP主的视频")
-                        
-                        # 按发布时间排序
-                        matched_videos.sort(key=lambda x: x['pubdate'], reverse=True)
-                        latest_video = matched_videos[0]
-                        sv.logger.info(f"搜索API(名字-up)获取成功: {latest_video['title']}")
-                        
-                        # 如果BV号相同，说明可能不是最新视频，触发第三道检查
-                        if latest_video['bvid'] == last_vid:
-                            sv.logger.info("更新判断(搜索API(名字-up)): 无新发布(发布时间未超过阈值)")
-                            raise Exception("触发第三道检查")
-                            
+                        params = {
+                            'search_type': 'video',
+                            'keyword': search_term,
+                            'order': 'pubdate',
+                            'ps': MAX_RESULTS * 2,
+                            'platform': 'web'
+                        }
+
+                        headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                            'Referer': 'https://www.bilibili.com/',
+                            'Cookie': 'buvid3=XXXXXX;'
+                        }
+
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(
+                                'https://api.bilibili.com/x/web-interface/search/type',
+                                params=params,
+                                headers=headers,
+                                timeout=10
+                            ) as resp:
+                                if resp.status != 200:
+                                    raise Exception(f"HTTP {resp.status}")
+                                
+                                data = await resp.json()
+                                if data.get('code') != 0:
+                                    raise Exception(data.get('message', '未知API错误'))
+                                
+                                raw_results = data['data'].get('result', [])
+                                if not raw_results:
+                                    raise Exception("未找到UP主视频")
+                                
+                                # 严格筛选逻辑（与查视频 -up 完全相同）
+                                matched_videos = []
+                                for video in raw_results:
+                                    if normalize_name(video['author']) == normalize_name(up_name):
+                                        matched_videos.append(video)
+                                
+                                if not matched_videos:
+                                    raise Exception("搜索结果中没有匹配UP主的视频")
+                                
+                                # 按发布时间排序（确保获取最新视频）
+                                matched_videos.sort(key=lambda x: x['pubdate'], reverse=True)
+                                latest_video = matched_videos[0]
+                                sv.logger.info(f"搜索API(查视频-up)获取成功: {latest_video['title']}")
+                                
+                                # 如果BV号相同，说明可能不是最新视频，触发第三道检查
+                                if latest_video['bvid'] == last_vid:
+                                    sv.logger.info("更新判断(搜索API(查视频-up)): 无新发布(发布时间未超过阈值)")
+                                    raise Exception("触发第三道检查")
+                                    
                     except Exception as e:
-                        sv.logger.warning(f"搜索API(名字-up)触发第三道检查({up_name}): {str(e)}")
-                        # 第三步：使用与"查视频"相同的直接搜索逻辑
+                        sv.logger.warning(f"搜索API(查视频-up)触发第三道检查({up_name}): {str(e)}")
+                        # 第三步：使用普通搜索作为最后保障
                         check_method = "直接搜索(查视频+UP名)"
                         try:
-                            # 使用普通搜索模式
                             results = await get_bilibili_search(up_name)
                             if not results:
                                 raise Exception("未找到相关视频")
                             
-                            # 在结果中查找作者完全匹配的视频
                             matched_videos = []
                             for video in results:
                                 if normalize_name(video['author']) == normalize_name(up_name):
@@ -481,7 +511,6 @@ async def check_up_updates():
                             if not matched_videos:
                                 raise Exception("搜索结果中没有匹配UP主的视频")
                             
-                            # 按发布时间排序
                             matched_videos.sort(key=lambda x: x['pubdate'], reverse=True)
                             latest_video = matched_videos[0]
                             sv.logger.info(f"直接搜索(查视频+UP名)获取成功: {latest_video['title']}")
@@ -493,11 +522,10 @@ async def check_up_updates():
                     sv.logger.info(f"无法获取【{up_name}】的最新视频信息")
                     continue
                 
-                # 处理获取到的最新视频
+                # 验证是否为新视频
                 current_bvid = latest_video['bvid']
                 video_pub_time = datetime.fromtimestamp(latest_video['pubdate'])
                 
-                # 验证是否为新视频
                 is_new = False
                 reason = ""
                 
