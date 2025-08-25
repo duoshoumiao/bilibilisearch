@@ -17,7 +17,7 @@ sv = Service('b站视频搜索', enable_on_default=True, help_='搜索B站视频
 
 # 配置项
 MAX_RESULTS = 5
-UP_WATCH_INTERVAL = 10  # 监控间隔(分钟)
+UP_WATCH_INTERVAL = 30  # 监控间隔(分钟)
 CACHE_EXPIRE_MINUTES = 3
 search_cache = {}
 
@@ -393,7 +393,7 @@ async def check_up_updates():
         for up_name, info in up_dict.items():
             try:
                 # 添加延迟防止请求过于频繁
-                await asyncio.sleep(15)
+                await asyncio.sleep(30)
                 
                 last_vid = info.get('last_vid')
                 sv.logger.info(f"开始检查UP主【{up_name}】更新，上次记录视频: {last_vid or '无'}")
