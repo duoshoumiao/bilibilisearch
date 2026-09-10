@@ -392,6 +392,52 @@ async def list_watched_ups(bot, ev: CQEvent):
         up_list.append("━━━━━━━━━━━━━━━━━━")  
       
     await bot.send(ev, "\n".join(up_list))  
+
+@sv.on_fullmatch(('刷新关注', '刷新up'))  
+async def refresh_watched_ups(bot, ev: CQEvent):  
+    """刷新本群所有关注UP主的 last_vid / last_pubdate（补写新字段，避免推送旧视频）"""  
+    group_id = ev.group_id  
+    watches = watch_storage.get_group_watches(group_id)  
+    if not watches:  
+        await bot.send(ev, '当前没有监控任何UP主')  
+        return  
+  
+    await bot.send(ev, f'🔄 开始刷新本群 {len(watches)} 个UP主的记录...')  
+    refreshed, failed = 0, 0  
+  
+    async with aiohttp.ClientSession() as session:  
+        # 注意 dict 迭代期间会被 update 修改，先复制一份 items  
+        for up_name, info in list(watches.items()):  
+            try:  
+                await asyncio.sleep(UP_CHECK_DELAY)  
+                mid = info.get('mid')  
+  
+                # 没有mid就用last_vid反查  
+                if not mid and info.get('last_vid'):  
+                    vinfo = await get_video_info_with_retry(info['last_vid'])  
+                    if vinfo:  
+                        mid = vinfo['owner']['mid']  
+  
+                all_videos, mid = await _fetch_up_videos(session, up_name, mid)  
+                if not all_videos:  
+                    failed += 1  
+                    continue  
+  
+                latest = max(all_videos, key=lambda x: x.get('pubdate', 0))  
+                watch_storage.update_last_video(  
+                    group_id=group_id,  
+                    up_name=up_name,  
+                    last_vid=latest['bvid'],  
+                    mid=mid,  
+                    last_pubdate=latest.get('pubdate', 0)  
+                )  
+                refreshed += 1  
+            except Exception as e:  
+                sv.logger.warning(f"刷新【{up_name}】失败: {str(e)}")  
+                failed += 1  
+                continue  
+  
+    await bot.send(ev, f'✅ 刷新完成：成功 {refreshed} 个，失败 {failed} 个')
   
 async def _fetch_up_videos(session, up_name, mid):  
     """获取某个UP主的最新视频列表；优先空间API，失败才走搜索兜底。  
