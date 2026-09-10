@@ -66,8 +66,9 @@ class UpWatchStorage:
                                 self._data[group_id_str][up_name] = {  
                                     'last_check': info.get('last_check', datetime.now().isoformat()),  
                                     'last_vid': info.get('last_vid'),  
-                                    'mid': info.get('mid')  # 兼容老数据(无mid则为None)  
-                                }  
+                                    'mid': info.get('mid'),  # 兼容老数据(无mid则为None)  
+                                    'last_pubdate': info.get('last_pubdate')  # 兼容老数据(无则为None)  
+                                } 
                                 # 更新名称索引  
                                 up_name_lower = normalize_name(up_name)  
                                 if up_name_lower not in self.name_index:  
@@ -95,8 +96,9 @@ class UpWatchStorage:
         self._data[group_id][up_name] = {  
             'last_check': datetime.now().isoformat(),  
             'last_vid': last_vid,  
-            'mid': mid  
-        }  
+            'mid': mid,  
+            'last_pubdate': None  
+        } 
           
         # 更新名称索引  
         up_name_lower = normalize_name(up_name)  
@@ -141,8 +143,8 @@ class UpWatchStorage:
         """获取所有监控数据"""  
         return self._data  
       
-    def update_last_video(self, group_id: int, up_name: str, last_vid: str, mid: int = None):  
-        """更新最后视频记录（可顺带回写mid）"""  
+    def update_last_video(self, group_id: int, up_name: str, last_vid: str, mid: int = None, last_pubdate: int = None):  
+        """更新最后视频记录（可顺带回写mid和发布时间）"""  
         group_id = str(group_id)  
         if group_id in self._data and up_name in self._data[group_id]:  
             update = {  
@@ -151,8 +153,10 @@ class UpWatchStorage:
             }  
             if mid:  
                 update['mid'] = mid  
+            if last_pubdate:  
+                update['last_pubdate'] = last_pubdate  
             self._data[group_id][up_name].update(update)  
-            self.save()  
+            self.save() 
       
     def find_up_by_name(self, name: str) -> Dict[str, str]:  
         """通过名称查找UP主"""  
@@ -624,12 +628,20 @@ async def check_up_updates():
                                     if time_diff > 300:  # 5分钟阈值  
                                         is_new = True  
                                         reason = f"新视频发布时间({video_pub_time})比上次({last_pub_time})晚{time_diff/60:.1f}分钟"  
-                                    elif title_changed and time_diff > -300:  # 允许5分钟误差  
+                                    elif title_changed and time_diff > 0:  # 必须严格晚于上次已推送视频  
                                         is_new = True  
-                                        reason = "标题不同且发布时间相近，视为新视频"  
+                                        reason = "标题不同且发布时间更晚，视为新视频"  
                                     else:  
-                                        reason = "无新发布(未满足推送条件)"  
+                                        reason = "无新发布(未满足推送条件，发布时间不晚于上次)"
   
+                        # 全局硬约束：候选视频发布时间必须严格晚于本群已推送过的最新发布时间  
+                        if is_new:  
+                            stored = watch_storage.get_group_watches(int(group_id)).get(up_name, {})  
+                            last_pubdate = stored.get('last_pubdate')  
+                            if last_pubdate and latest_video.get('pubdate', 0) <= last_pubdate:  
+                                is_new = False  
+                                reason = f"候选视频发布时间不晚于已推送记录({last_pubdate})，跳过"
+                        
                         sv.logger.info(f"视频检查详情:\n"  
                                        f"群: {group_id}\n"  
                                        f"UP主: {up_name}\n"  
@@ -645,8 +657,9 @@ async def check_up_updates():
                                 group_id=group_id,  
                                 up_name=up_name,  
                                 last_vid=current_bvid,  
-                                mid=mid  
-                            )  
+                                mid=mid,  
+                                last_pubdate=latest_video.get('pubdate', 0)  
+                            ) 
   
                             pub_time = video_pub_time.strftime("%Y-%m-%d %H:%M")  
                             pic_url = process_pic_url(latest_video['pic'])  
